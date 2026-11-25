@@ -1,5 +1,7 @@
 # eaglercraft-bridgetcp
 
+> **Info**: This was builded/coded entirely by AI *(yes im absolutely vibe-coded it :] )*
+> 
 A WebSocket-to-Java TCP bridge that lets an Eaglercraft client join a Java Minecraft server.
 
 ## Requirements
