@@ -10,12 +10,14 @@ A WebSocket-to-Java TCP bridge that lets an Eaglercraft client join a Java Minec
 ## Quick start
 
 1. Run `start-bridge.sh` (Linux/macOS) or `start-bridge.bat` (Windows). The first run installs dependencies.
-2. Open `http://localhost:8081` to set the target Java server.
+2. Open `http://localhost:8081` and set the target Java server's host, port, and protocol version. Changes take effect immediately, no restart needed.
 3. Connect your Eaglercraft client to `ws://localhost:8081`.
+
+The start scripts only accept the bridge's own port, e.g. `./start-bridge.sh 8082`. The target server is set in the web UI or with the variables below.
 
 ## Configuration
 
-Set these as environment variables or pass them as command-line arguments:
+These can be set as environment variables when launching `bridge.js` directly. The web UI overrides the target values at runtime:
 
 | Variable | Default | Description |
 | --- | --- | --- |
