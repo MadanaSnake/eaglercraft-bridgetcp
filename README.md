@@ -41,6 +41,7 @@ Prebuilt packages are on the [Releases](../../releases) page as `Eaglercraft-bri
 
 - Offline (cracked) mode only.
 - Protocol 764+ configuration-state handling is not yet tested against a live server.
+- Version below <26.2 are not tested such as 1.12.2, 1.8.8, and many other version. Feel free to make an issue for making this compatible
 
 ## License
 
