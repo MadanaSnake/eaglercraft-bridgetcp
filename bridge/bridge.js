@@ -271,6 +271,11 @@ const UI_HTML = `<!doctype html>
   .row { display: flex; gap: 8px; }
   .row > div { flex: 1; }
   .row > div:first-child { flex: 2; }
+  .flags { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 4px; }
+  .chip { font-size: 0.7rem; padding: 2px 8px; border-radius: 999px; border: 1px solid #30363d; color: #8b949e; white-space: nowrap; }
+  .chip.on { color: #7ee787; border-color: #238636; }
+  .chip.off { color: #d29922; border-color: #9e6a03; }
+  .chip.idle { color: #6e7681; }
   .card { background: #1b1f27; border: 1px solid #30363d; border-radius: 10px; padding: 24px; width: 100%; max-width: 420px; box-shadow: 0 8px 24px rgba(0,0,0,0.4); }
   h1 { font-size: 1.2rem; margin: 0; color: #58a6ff; }
   label { display: block; font-size: 0.85rem; color: #8b949e; margin: 12px 0 4px; }
@@ -283,6 +288,8 @@ const UI_HTML = `<!doctype html>
   button:hover { background: #2ea043; }
   .ws-box { margin-top: 16px; padding: 10px; background: #0d1117; border: 1px solid #30363d; border-radius: 6px; font-size: 0.85rem; display: flex; justify-content: space-between; align-items: center; }
   .ws-box code { color: #7ee787; }
+  .ws-box.warn { color: #d29922; }
+  .ws-box.warn code { color: #d29922; }
   .copy-btn { width: auto; margin: 0; padding: 4px 10px; font-size: 0.75rem; background: #30363d; }
   .status { margin-top: 10px; font-size: 0.85rem; color: #7ee787; min-height: 1.2em; }
 </style>
@@ -290,7 +297,8 @@ const UI_HTML = `<!doctype html>
 <body>
 <div class="card">
   <h1>Eaglercraft &harr; Java TCP Bridge</h1>
-  <p class="lede">Relays an Eaglercraft client to a real Java Minecraft server over WebSocket. Point it at a server running with <code>online-mode=false</code>, pick the protocol your client speaks, then connect the game to an address below. Changes apply immediately, no restart.</p>
+  <p class="lede">Relays an Eaglercraft client to a Java Minecraft server. Set the server, pick your client version, then connect the game to an address below.</p>
+  <div class="flags" id="flags"></div>
   <label>Java server address and port</label>
   <div class="row">
     <div><input id="host" placeholder="play.example.net"></div>
@@ -313,18 +321,21 @@ const UI_HTML = `<!doctype html>
     <span>1.8.8 / 1.12.2: <code id="wssUrl"></code></span>
     <button class="copy-btn" onclick="copyUrl('wssUrl')">Copy</button>
   </div>
+  <div class="ws-box warn" id="wssOff" style="display:none;">
+    <span>1.8.8 / 1.12.2 need <code>wss://</code> — restart the bridge with <code>WSS=1</code></span>
+  </div>
   <div class="ws-box" id="playBox" style="display:none;">
     <span>Game page: <a href="/play" style="color:#7ee787;">/play</a></span>
     <button class="copy-btn" onclick="window.open('/play', '_blank')">Open</button>
   </div>
-  <footer>The Java server must run with <code>online-mode=false</code>. Browsers treat <code>127.0.0.1</code> as local and secure, so an https game page can still reach the plain <code>ws://</code> address.</footer>
+  <footer>The Java server must run with <code>online-mode=false</code>. The plain <code>ws://</code> listener is always on; <code>wss://</code>, which the 1.8.8 and 1.12.2 clients require, only exists when the bridge is started with <code>WSS=1</code>. Browsers treat <code>127.0.0.1</code> as secure, so an https game page can still reach <code>ws://</code>.</footer>
 </div>
 <script>
   const PRESETS = [
     { protocol: 777, label: 'Eaglercraft 26.3 (protocol 777)' },
     { protocol: 776, label: 'Eaglercraft 26.2 (protocol 776)' },
-    { protocol: 340, label: 'Eaglercraft 1.12.2 (protocol 340)' },
-    { protocol: 47, label: 'Eaglercraft 1.8.8 (protocol 47)' }
+    { protocol: 340, label: 'Eaglercraft 1.12.2 (protocol 340)', needsWss: true },
+    { protocol: 47, label: 'Eaglercraft 1.8.8 (protocol 47)', needsWss: true }
   ];
   const presetSelect = document.getElementById('protoPreset');
   const customInput = document.getElementById('protoCustom');
@@ -363,6 +374,33 @@ const UI_HTML = `<!doctype html>
     customInput.value = Number.isFinite(protocol) ? String(protocol) : '';
   }
 
+  // The 1.8.8 and 1.12.2 clients only speak wss://, so their presets are greyed
+  // out unless the bridge was started with WSS=1.
+  function applyWssState(enabled) {
+    PRESETS.forEach((p) => {
+      if (!p.needsWss) return;
+      const opt = presetSelect.querySelector('option[value="' + p.protocol + '"]');
+      if (!opt) return;
+      opt.disabled = !enabled;
+      opt.textContent = p.label + (enabled ? '' : ' - needs WSS=1');
+    });
+  }
+
+  function renderFlags(config) {
+    const box = document.getElementById('flags');
+    box.textContent = '';
+    [
+      { text: 'ws:// ' + config.wsPort, state: 'on' },
+      { text: config.wssEnabled ? 'wss:// ' + config.wssPort : 'wss:// off', state: config.wssEnabled ? 'on' : 'off' },
+      { text: config.playUrl ? '/play' : '/play off', state: config.playUrl ? 'on' : 'idle' }
+    ].forEach((chip) => {
+      const el = document.createElement('span');
+      el.className = 'chip ' + chip.state;
+      el.textContent = chip.text;
+      box.appendChild(el);
+    });
+  }
+
   function setStatus(text, isError) {
     const el = document.getElementById('status');
     el.textContent = text;
@@ -384,6 +422,7 @@ const UI_HTML = `<!doctype html>
   fetch('/api/config').then(r => r.json()).then(c => {
     document.getElementById('host').value = c.mcHost;
     document.getElementById('port').value = c.mcPort;
+    applyWssState(c.wssEnabled);
     setProtocol(c.protocolVersion);
     wsUrl = 'ws://' + location.hostname + ':' + c.wsPort;
     document.getElementById('wsUrl').textContent = wsUrl;
@@ -391,7 +430,13 @@ const UI_HTML = `<!doctype html>
       document.getElementById('wssUrl').textContent = 'wss://' + location.hostname + ':' + c.wssPort;
       document.getElementById('wssBox').style.display = 'flex';
     }
-    if (c.playUrl) document.getElementById('playBox').style.display = 'flex';
+    if (c.playUrl) {
+      document.getElementById('playBox').style.display = 'flex';
+    } else {
+      document.getElementById('playBox').style.display = 'none';
+    }
+    if (!c.wssEnabled) document.getElementById('wssOff').style.display = 'flex';
+    renderFlags(c);
   });
   function save() {
     const protocol = selectedProtocol();

@@ -46,6 +46,8 @@ The config page's **Client version / Minecraft protocol** dropdown has one prese
 | Eaglercraft 1.8.8 (official download) | `47` |
 | Anything else | Custom protocol, e.g. `763` for 1.20.1 or `769` for 1.21.4 |
 
+The page also shows which listeners are live — `ws:// <port>`, `wss:// <port>` and `/play` — as coloured chips, and the 1.8.8 and 1.12.2 presets stay greyed out (`- needs WSS=1`) until the bridge is started with that flag. Their connect box is replaced by a notice explaining the same thing.
+
 The dropdown always reflects the protocol the bridge is currently using: a value that matches no preset shows up as **Custom protocol...** with the number filled in. Saving is refused if the host is empty or the port/protocol fall outside 1–65535.
 
 ## Which address does each client use?
