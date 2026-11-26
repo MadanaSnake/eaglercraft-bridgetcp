@@ -31,6 +31,7 @@ These can be set as environment variables when launching `bridge.js` directly. T
 | `WSS` | unset | `1` serves HTTPS + `wss://` instead of HTTP + `ws://` |
 | `CERT_FILE` | `bridge-cert.pem` | TLS certificate (generated on first `WSS=1` run) |
 | `KEY_FILE` | `bridge-key.pem` | TLS private key |
+| `CLIENT_HTML` | unset | Eaglercraft build to serve at `/play` |
 
 ## Older clients need wss://
 
@@ -51,6 +52,16 @@ CERT_FILE=localhost+2.pem KEY_FILE=localhost+2-key.pem WSS=1 ./start-bridge.sh 8
 ```
 
 Certificate files are gitignored; never commit the private key.
+
+## Serve the game from the bridge
+
+The bridge can host an Eaglercraft build too, so the game page, the config UI and the socket share one origin:
+
+```bash
+CLIENT_HTML=/path/to/eaglercraft.html WSS=1 ./start-bridge.sh 8081
+```
+
+`https://localhost:8081/play` serves that file (streamed, so a 78 MB build is fine) and the config page gets an "Open" shortcut. With `WSS=1` everything sits on one certificate: accept the warning once on `/play`, then connect the client to `wss://127.0.0.1:8081` — no GitHub Pages, no mixed content.
 
 ## Security
 

@@ -152,6 +152,10 @@ const USE_WSS = process.argv.includes('--wss') || /^(1|true|yes|on)$/i.test(Stri
 const CERT_FILE = process.env.CERT_FILE || 'bridge-cert.pem';
 const KEY_FILE = process.env.KEY_FILE || 'bridge-key.pem';
 
+// Optional: serve an Eaglercraft build from this server at /play, so the game
+// page and the WebSocket share one origin (no mixed content, one certificate).
+const CLIENT_HTML = process.env.CLIENT_HTML || '';
+
 function loadTlsMaterial() {
   if (fs.existsSync(CERT_FILE) && fs.existsSync(KEY_FILE)) {
     return { key: fs.readFileSync(KEY_FILE), cert: fs.readFileSync(CERT_FILE) };
@@ -273,6 +277,10 @@ const UI_HTML = `<!doctype html>
     <span>Eaglercraft URL: <code id="wsUrl"></code></span>
     <button class="copy-btn" onclick="copyWs()">Copy</button>
   </div>
+  <div class="ws-box" id="playBox" style="display:none;">
+    <span>Game page: <a href="/play" style="color:#7ee787;">/play</a></span>
+    <button class="copy-btn" onclick="window.open('/play', '_blank')">Open</button>
+  </div>
 </div>
 <script>
   const wsUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host;
@@ -281,6 +289,7 @@ const UI_HTML = `<!doctype html>
     document.getElementById('host').value = c.mcHost;
     document.getElementById('port').value = c.mcPort;
     document.getElementById('proto').value = c.protocolVersion;
+    if (c.playUrl) document.getElementById('playBox').style.display = 'flex';
   });
   function save() {
     fetch('/api/config', {
@@ -312,12 +321,37 @@ const UI_HTML = `<!doctype html>
 
 // --- HTTP + WebSocket Server ---
 const requestHandler = (req, res) => {
-  if (req.method === 'GET' && req.url === '/') {
+  if (req.method === 'GET' && (req.url === '/play' || req.url === '/play.html') && CLIENT_HTML) {
+    fs.stat(CLIENT_HTML, (err, stat) => {
+      if (err || !stat.isFile()) {
+        res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('CLIENT_HTML not found: ' + CLIENT_HTML);
+        return;
+      }
+      res.writeHead(200, {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Content-Length': stat.size,
+        'Cache-Control': 'no-store',
+      });
+      const stream = fs.createReadStream(CLIENT_HTML);
+      stream.on('error', () => res.destroy());
+      stream.pipe(res);
+    });
+  } else if (req.method === 'GET' && req.url === '/') {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     res.end(UI_HTML);
+  } else if (req.method === 'GET' && req.url === '/play' && !CLIENT_HTML) {
+    res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end('No client configured. Start the bridge with CLIENT_HTML=/path/to/eaglercraft.html');
   } else if (req.method === 'GET' && req.url === '/api/config') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ mcHost: MC_HOST, mcPort: MC_PORT, protocolVersion: PROTOCOL_VERSION, wsPort: WS_PORT }));
+    res.end(JSON.stringify({
+      mcHost: MC_HOST,
+      mcPort: MC_PORT,
+      protocolVersion: PROTOCOL_VERSION,
+      wsPort: WS_PORT,
+      playUrl: CLIENT_HTML ? '/play' : null,
+    }));
   } else if (req.method === 'POST' && req.url === '/api/config') {
     let body = '';
     req.on('data', (c) => (body += c));
@@ -370,6 +404,9 @@ server.listen(WS_PORT, BIND_HOST, () => {
   console.log(`  Target Java  : ${MC_HOST}:${MC_PORT} (protocol ${PROTOCOL_VERSION})`);
   if (USE_WSS) {
     console.log(`  TLS          : self-signed cert - open the Web UI and accept the warning once`);
+  }
+  if (CLIENT_HTML) {
+    console.log(`  Game page    : ${webScheme}://localhost:${WS_PORT}/play (from CLIENT_HTML)`);
   }
   console.log(`  Note: Target Java server must have online-mode=false`);
 });
