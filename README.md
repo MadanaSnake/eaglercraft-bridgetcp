@@ -28,30 +28,48 @@ These can be set as environment variables when launching `bridge.js` directly. T
 | `MC_PORT` | `25565` | Java server port |
 | `MC_PROTOCOL` | `777` | Protocol version (777 = 26.2/26.3) |
 | `BIND_HOST` | `127.0.0.1` | Interface to listen on. Use `0.0.0.0` for LAN access |
-| `WSS` | unset | `1` serves HTTPS + `wss://` instead of HTTP + `ws://` |
+| `WSS` | unset | `1` adds a second, HTTPS + `wss://` listener next to the plain one |
+| `WSS_PORT` | `WS_PORT + 1` | Port for the HTTPS + `wss://` listener |
 | `CERT_FILE` | `bridge-cert.pem` | TLS certificate (generated on first `WSS=1` run) |
 | `KEY_FILE` | `bridge-key.pem` | TLS private key |
 | `CLIENT_HTML` | unset | Eaglercraft build to serve at `/play` |
 
-## Older clients need wss://
+## Which address does each client use?
 
-26.2/26.3 accept a plain `ws://localhost:8081` address. The 1.8.8 and 1.12.2 builds only accept `wss://`, so the bridge can terminate TLS itself:
-
-```bash
-WSS=1 ./start-bridge.sh 8081          # Linux/macOS
-set WSS=1 && start-bridge.bat 8081    # Windows
-```
-
-On the first run it writes `bridge-cert.pem` and `bridge-key.pem` next to `bridge.js` (self-signed, `CN=localhost`, valid for `localhost`, `127.0.0.1` and `::1`). No browser trusts that certificate, so open `https://localhost:8081` once and accept the warning, then set the server address to `wss://localhost:8081`. Passing `--wss` works too (`node bridge.js 8081 --wss`), and the web UI shows a `wss://` address when TLS is on.
-
-A certificate you already trust removes the warning — for example with `mkcert`:
+Plain HTTP/WS always runs on `WS_PORT` (`ws://127.0.0.1:8081`). With `WSS=1` the same process *also* serves HTTPS + `wss://` on `WSS_PORT`, default `WS_PORT + 1` (`wss://127.0.0.1:8082`), so one bridge covers every client:
 
 ```bash
-mkcert -install && mkcert localhost 127.0.0.1 ::1
-CERT_FILE=localhost+2.pem KEY_FILE=localhost+2-key.pem WSS=1 ./start-bridge.sh 8081
+./start-bridge.sh 8081        # 26.2/26.3 over ws://
+WSS=1 ./start-bridge.sh 8081  # 26.2/26.3 over ws:// and 1.8.8/1.12.2 over wss://
 ```
+
+| Client | Address | Why |
+| --- | --- | --- |
+| This repo's 26.2/26.3 builds (served over https by GitHub Pages) | `ws://127.0.0.1:8081` | browsers treat `localhost`/`127.0.0.1` as trustworthy, so `ws://` is not blocked as mixed content |
+| The same builds, or any other 26.2/26.3 | `wss://127.0.0.1:8082` | works once the certificate is trusted |
+| eaglercraft.com 1.8.8 / 1.12.2 | `wss://127.0.0.1:8082` | those clients reject anything that is not `wss://` |
+| Any client, any machine, no local certificate | `wss://<tunnel-host>` | see the tunnel section below |
+
+The config page lists both addresses with copy buttons, and the bridge ignores the WebSocket `Origin` header, so pages served from `eaglercraft.com` or GitHub Pages connect the same way.
+
+### Making the certificate trusted
+
+`wss://` fails during the handshake if the browser does not trust the certificate, and the game only shows a generic connection error. Two ways around it:
+
+- **`mkcert`** — if it is installed, the bridge uses it automatically on the first run (`mkcert -install` once, then restart the bridge). No warning, both client families work.
+- **Click-through** — otherwise the bridge writes a self-signed `bridge-cert.pem` / `bridge-key.pem`. Open `https://127.0.0.1:8082` once and accept the warning; that exception covers `wss://` to the same host and port.
 
 Certificate files are gitignored; never commit the private key.
+
+### No local certificate: a tunnel
+
+If you do not want to install anything on the machine running the bridge, put the plain listener behind a tunnel that has a real certificate:
+
+```bash
+cloudflared tunnel --url http://localhost:8081
+```
+
+Use the `https://….trycloudflare.com` hostname it prints as `wss://<host>` in the client. The bridge stays on plain HTTP behind the tunnel; TLS ends at Cloudflare.
 
 ## Serve the game from the bridge
 
@@ -61,7 +79,7 @@ The bridge can host an Eaglercraft build too, so the game page, the config UI an
 CLIENT_HTML=/path/to/eaglercraft.html WSS=1 ./start-bridge.sh 8081
 ```
 
-`https://localhost:8081/play` serves that file (streamed, so a 78 MB build is fine) and the config page gets an "Open" shortcut. With `WSS=1` everything sits on one certificate: accept the warning once on `/play`, then connect the client to `wss://127.0.0.1:8081` — no GitHub Pages, no mixed content.
+`/play` serves that file on both listeners (streamed, so a 78 MB build is fine) and the config page gets an "Open" shortcut. With `WSS=1`, `https://127.0.0.1:8082/play` puts the game page, the config UI and the socket on one certificate: accept the warning once, then connect the client to `wss://127.0.0.1:8082`. The plain listener also serves `http://127.0.0.1:8081/play`.
 
 ## Security
 

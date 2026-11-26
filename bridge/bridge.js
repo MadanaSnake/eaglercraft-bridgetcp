@@ -146,9 +146,11 @@ let MC_HOST = process.env.MC_HOST || ARGS[1] || '127.0.0.1';
 let MC_PORT = parseInt(process.env.MC_PORT || ARGS[2] || '25565', 10);
 let PROTOCOL_VERSION = parseInt(process.env.MC_PROTOCOL || ARGS[3] || '777', 10); // 777 = 26.2/26.3
 
-// Older clients (1.8.8/1.12.2 builds) only accept wss:// addresses, so the
-// bridge can terminate TLS itself: WSS=1 ./start-bridge.sh 8081 (or --wss).
+// The plain HTTP/WS listener always runs: 26.2/26.3 accept ws://, and browsers
+// exempt localhost from mixed-content blocking. WSS=1 adds a second, TLS
+// listener for clients that only accept wss:// (the 1.8.8/1.12.2 builds).
 const USE_WSS = process.argv.includes('--wss') || /^(1|true|yes|on)$/i.test(String(process.env.WSS || ''));
+const WSS_PORT = parseInt(process.env.WSS_PORT || String(WS_PORT + 1), 10);
 const CERT_FILE = process.env.CERT_FILE || 'bridge-cert.pem';
 const KEY_FILE = process.env.KEY_FILE || 'bridge-key.pem';
 
@@ -156,8 +158,23 @@ const KEY_FILE = process.env.KEY_FILE || 'bridge-key.pem';
 // page and the WebSocket share one origin (no mixed content, one certificate).
 const CLIENT_HTML = process.env.CLIENT_HTML || '';
 
+function tryMkcert() {
+  try {
+    execFileSync('mkcert', [
+      '-cert-file', CERT_FILE, '-key-file', KEY_FILE, 'localhost', '127.0.0.1', '::1',
+    ], { stdio: 'pipe' });
+    return fs.existsSync(CERT_FILE) && fs.existsSync(KEY_FILE);
+  } catch {
+    return false;
+  }
+}
+
 function loadTlsMaterial() {
   if (fs.existsSync(CERT_FILE) && fs.existsSync(KEY_FILE)) {
+    return { key: fs.readFileSync(KEY_FILE), cert: fs.readFileSync(CERT_FILE) };
+  }
+  if (tryMkcert()) {
+    console.log(`  TLS          : using mkcert certificate (${CERT_FILE})`);
     return { key: fs.readFileSync(KEY_FILE), cert: fs.readFileSync(CERT_FILE) };
   }
   console.log('WSS enabled and no certificate found; generating a self-signed one...');
@@ -274,8 +291,12 @@ const UI_HTML = `<!doctype html>
   </div>
   <div class="status" id="status"></div>
   <div class="ws-box">
-    <span>Eaglercraft URL: <code id="wsUrl"></code></span>
-    <button class="copy-btn" onclick="copyWs()">Copy</button>
+    <span>26.2 / 26.3: <code id="wsUrl"></code></span>
+    <button class="copy-btn" onclick="copyUrl('wsUrl')">Copy</button>
+  </div>
+  <div class="ws-box" id="wssBox" style="display:none;">
+    <span>1.8.8 / 1.12.2: <code id="wssUrl"></code></span>
+    <button class="copy-btn" onclick="copyUrl('wssUrl')">Copy</button>
   </div>
   <div class="ws-box" id="playBox" style="display:none;">
     <span>Game page: <a href="/play" style="color:#7ee787;">/play</a></span>
@@ -283,12 +304,23 @@ const UI_HTML = `<!doctype html>
   </div>
 </div>
 <script>
-  const wsUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host;
+  let wsUrl = 'ws://' + location.hostname + ':' + location.port;
   document.getElementById('wsUrl').textContent = wsUrl;
+  function copyUrl(id) {
+    const value = document.getElementById(id).textContent;
+    navigator.clipboard.writeText(value);
+    document.getElementById('status').textContent = 'Copied ' + value;
+  }
   fetch('/api/config').then(r => r.json()).then(c => {
     document.getElementById('host').value = c.mcHost;
     document.getElementById('port').value = c.mcPort;
     document.getElementById('proto').value = c.protocolVersion;
+    wsUrl = 'ws://' + location.hostname + ':' + c.wsPort;
+    document.getElementById('wsUrl').textContent = wsUrl;
+    if (c.wssEnabled) {
+      document.getElementById('wssUrl').textContent = 'wss://' + location.hostname + ':' + c.wssPort;
+      document.getElementById('wssBox').style.display = 'flex';
+    }
     if (c.playUrl) document.getElementById('playBox').style.display = 'flex';
   });
   function save() {
@@ -303,10 +335,6 @@ const UI_HTML = `<!doctype html>
     }).then(r => r.json()).then(c => {
       document.getElementById('status').textContent = 'Updated: ' + c.mcHost + ':' + c.mcPort + ' (protocol ' + c.protocolVersion + ')';
     });
-  }
-  function copyWs() {
-    navigator.clipboard.writeText(wsUrl);
-    document.getElementById('status').textContent = 'Copied ' + wsUrl;
   }
   function testPing() {
     const st = document.getElementById('status');
@@ -350,6 +378,8 @@ const requestHandler = (req, res) => {
       mcPort: MC_PORT,
       protocolVersion: PROTOCOL_VERSION,
       wsPort: WS_PORT,
+      wssEnabled: USE_WSS,
+      wssPort: USE_WSS ? WSS_PORT : null,
       playUrl: CLIENT_HTML ? '/play' : null,
     }));
   } else if (req.method === 'POST' && req.url === '/api/config') {
@@ -389,29 +419,37 @@ const requestHandler = (req, res) => {
   }
 };
 
-const server = USE_WSS
-  ? https.createServer(loadTlsMaterial(), requestHandler)
-  : http.createServer(requestHandler);
+function startListener(port, tls) {
+  const server = tls
+    ? https.createServer(loadTlsMaterial(), requestHandler)
+    : http.createServer(requestHandler);
+  const wss = createWebSocketServer(server);
+  wss.on('connection', handleConnection);
+  server.on('error', (err) => {
+    console.error(`Cannot listen on ${BIND_HOST}:${port}: ${err.message}`);
+    process.exit(1);
+  });
+  server.listen(port, BIND_HOST, () => {
+    const scheme = tls ? 'https' : 'http';
+    const label = tls ? 'Secure UI  ' : 'Config UI  ';
+    console.log(`  ${label} : ${scheme}://localhost:${port}  <-- Open this in your browser!`);
+  });
+  return server;
+}
 
-const wss = createWebSocketServer(server);
+console.log('Eaglercraft WS <-> Java TCP Bridge');
+console.log(`  Target Java  : ${MC_HOST}:${MC_PORT} (protocol ${PROTOCOL_VERSION})`);
+startListener(WS_PORT, false);
+if (USE_WSS) startListener(WSS_PORT, true);
+if (CLIENT_HTML) {
+  console.log(`  Game page    : /play (from CLIENT_HTML)`);
+}
+if (!USE_WSS) {
+  console.log('  1.8.8/1.12.2 need wss:// - restart with WSS=1 to add a TLS listener');
+}
+console.log(`  Note: Target Java server must have online-mode=false`);
 
-server.listen(WS_PORT, BIND_HOST, () => {
-  const webScheme = USE_WSS ? 'https' : 'http';
-  const wsScheme = USE_WSS ? 'wss' : 'ws';
-  console.log(`Eaglercraft WS <-> Java TCP Bridge`);
-  console.log(`  Web UI       : ${webScheme}://localhost:${WS_PORT}  <-- Open this in your browser!`);
-  console.log(`  WebSocket    : ${wsScheme}://localhost:${WS_PORT} (bound to ${BIND_HOST})`);
-  console.log(`  Target Java  : ${MC_HOST}:${MC_PORT} (protocol ${PROTOCOL_VERSION})`);
-  if (USE_WSS) {
-    console.log(`  TLS          : self-signed cert - open the Web UI and accept the warning once`);
-  }
-  if (CLIENT_HTML) {
-    console.log(`  Game page    : ${webScheme}://localhost:${WS_PORT}/play (from CLIENT_HTML)`);
-  }
-  console.log(`  Note: Target Java server must have online-mode=false`);
-});
-
-wss.on('connection', (ws, req) => {
+function handleConnection(ws, req) {
   const remote = req.socket.remoteAddress;
   let state = 'EAGLER_HANDSHAKE';
   let tcpSocket = null;
@@ -593,4 +631,4 @@ wss.on('connection', (ws, req) => {
 
   ws.on('close', cleanup);
   ws.on('error', cleanup);
-});
+}

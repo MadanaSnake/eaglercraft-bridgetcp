@@ -17,11 +17,7 @@ if errorlevel 1 (
 set "WS_PORT=%~1"
 if "%WS_PORT%"=="" set "WS_PORT=8081"
 
-set "SCHEME=http"
-if /i "%WSS%"=="1" set "SCHEME=https"
-if /i "%WSS%"=="true" set "SCHEME=https"
-
-echo Bridge is starting! Open %SCHEME%://localhost:%WS_PORT% in your browser to configure.
+echo Bridge is starting! Open the URL(s) it prints below to configure.
 echo Press Ctrl+C to stop.
 echo.
 node bridge.js "%WS_PORT%" %2
