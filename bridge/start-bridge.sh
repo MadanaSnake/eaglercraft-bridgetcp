@@ -12,12 +12,6 @@ if ! command -v node >/dev/null 2>&1; then
   exit 1
 fi
 
-if [ ! -d "node_modules" ]; then
-  echo "Installing dependencies (first-time setup)..."
-  npm install
-  echo
-fi
-
 WS_PORT=${1:-8081}
 echo "Bridge is starting! Open http://localhost:${WS_PORT} in your browser to configure."
 echo "Press Ctrl+C to stop."

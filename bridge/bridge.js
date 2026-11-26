@@ -2,7 +2,138 @@ const http = require('http');
 const net = require('net');
 const zlib = require('zlib');
 const crypto = require('crypto');
-const { WebSocketServer } = require('ws');
+const { EventEmitter } = require('events');
+
+// --- Minimal Zero-Dependency RFC 6455 WebSocket Server ---
+function createWebSocketServer(httpServer) {
+  const wss = new EventEmitter();
+  const WS_MAGIC = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
+
+  const encodeFrame = (opcode, payload) => {
+    const len = payload.length;
+    let header;
+    if (len < 126) {
+      header = Buffer.alloc(2);
+      header[0] = 0x80 | opcode;
+      header[1] = len;
+    } else if (len < 65536) {
+      header = Buffer.alloc(4);
+      header[0] = 0x80 | opcode;
+      header[1] = 126;
+      header.writeUInt16BE(len, 2);
+    } else {
+      header = Buffer.alloc(10);
+      header[0] = 0x80 | opcode;
+      header[1] = 127;
+      header.writeBigUInt64BE(BigInt(len), 2);
+    }
+    return Buffer.concat([header, payload]);
+  };
+
+  httpServer.on('upgrade', (req, socket) => {
+    const key = req.headers['sec-websocket-key'];
+    if (!key) { socket.destroy(); return; }
+    const accept = crypto.createHash('sha1').update(key + WS_MAGIC).digest('base64');
+    socket.write(
+      'HTTP/1.1 101 Switching Protocols\r\n' +
+      'Upgrade: websocket\r\n' +
+      'Connection: Upgrade\r\n' +
+      `Sec-WebSocket-Accept: ${accept}\r\n\r\n`
+    );
+
+    const ws = new EventEmitter();
+    ws.OPEN = 1;
+    ws.readyState = 1;
+    let buf = Buffer.alloc(0);
+    let fragChunks = [];
+    let fragOpcode = 0;
+
+    ws.send = (data) => {
+      if (ws.readyState !== 1 || socket.destroyed) return;
+      const isBuf = Buffer.isBuffer(data);
+      const payload = isBuf ? data : Buffer.from(String(data), 'utf8');
+      socket.write(encodeFrame(isBuf ? 0x02 : 0x01, payload));
+    };
+
+    ws.close = () => {
+      if (ws.readyState !== 1) return;
+      ws.readyState = 3;
+      if (!socket.destroyed) {
+        socket.write(encodeFrame(0x08, Buffer.alloc(0)));
+        socket.end();
+      }
+    };
+
+    socket.on('data', (chunk) => {
+      buf = Buffer.concat([buf, chunk]);
+      while (buf.length >= 2) {
+        const b0 = buf[0];
+        const b1 = buf[1];
+        const fin = (b0 & 0x80) !== 0;
+        const opcode = b0 & 0x0f;
+        const masked = (b1 & 0x80) !== 0;
+        let payloadLen = b1 & 0x7f;
+        let offset = 2;
+
+        if (payloadLen === 126) {
+          if (buf.length < 4) break;
+          payloadLen = buf.readUInt16BE(2);
+          offset = 4;
+        } else if (payloadLen === 127) {
+          if (buf.length < 10) break;
+          payloadLen = Number(buf.readBigUInt64BE(2));
+          offset = 10;
+        }
+
+        const maskLen = masked ? 4 : 0;
+        if (buf.length < offset + maskLen + payloadLen) break;
+
+        let payload = buf.subarray(offset + maskLen, offset + maskLen + payloadLen);
+        if (masked) {
+          const mask = buf.subarray(offset, offset + 4);
+          payload = Buffer.from(payload);
+          for (let i = 0; i < payload.length; i++) payload[i] ^= mask[i & 3];
+        }
+        buf = buf.subarray(offset + maskLen + payloadLen);
+
+        if (opcode === 0x08) {
+          ws.readyState = 3;
+          socket.end();
+          ws.emit('close');
+          return;
+        } else if (opcode === 0x09) {
+          if (!socket.destroyed) socket.write(encodeFrame(0x0a, payload));
+        } else if (opcode === 0x0a) {
+          // pong
+        } else {
+          if (opcode !== 0x00) {
+            fragOpcode = opcode;
+            fragChunks = [payload];
+          } else {
+            fragChunks.push(payload);
+          }
+          if (fin) {
+            const full = fragChunks.length === 1 ? fragChunks[0] : Buffer.concat(fragChunks);
+            fragChunks = [];
+            ws.emit('message', full, fragOpcode === 0x02);
+          }
+        }
+      }
+    });
+
+    socket.on('close', () => {
+      if (ws.readyState !== 3) {
+        ws.readyState = 3;
+        ws.emit('close');
+      }
+    });
+    socket.on('error', (err) => ws.emit('error', err));
+
+    wss.emit('connection', ws, req);
+  });
+
+  return wss;
+}
 
 const BIND_HOST = process.env.BIND_HOST || '127.0.0.1'; // set BIND_HOST=0.0.0.0 for LAN access
 const WS_PORT = parseInt(process.env.WS_PORT || process.argv[2] || '8081', 10);
@@ -190,7 +321,7 @@ const server = http.createServer((req, res) => {
   }
 });
 
-const wss = new WebSocketServer({ server });
+const wss = createWebSocketServer(server);
 
 server.listen(WS_PORT, BIND_HOST, () => {
   console.log(`Eaglercraft WS <-> Java TCP Bridge`);

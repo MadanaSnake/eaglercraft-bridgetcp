@@ -1,17 +1,17 @@
 # eaglercraft-bridgetcp
 
 > **Info**: This was builded/coded entirely by AI *(yes im absolutely vibe-coded it :] )*
-> 
-A WebSocket-to-Java TCP bridge that lets an Eaglercraft client join a Java Minecraft server.
+
+A WebSocket-to-Java TCP bridge that lets an Eaglercraft client join a Java Minecraft server. Zero dependencies: the WebSocket layer (RFC 6455) is implemented inside `bridge.js`, so there is nothing to `npm install`.
 
 ## Requirements
 
-- [Node.js](https://nodejs.org)
+- [Node.js](https://nodejs.org) 14 or newer
 - A Java Minecraft server with `online-mode=false` in `server.properties`. The bridge does not support online-mode authentication.
 
 ## Quick start
 
-1. Run `start-bridge.sh` (Linux/macOS) or `start-bridge.bat` (Windows). The first run installs dependencies.
+1. Run `start-bridge.sh` (Linux/macOS) or `start-bridge.bat` (Windows). There is nothing to install.
 2. Open `http://localhost:8081` and set the target Java server's host, port, and protocol version. Changes take effect immediately, no restart needed.
 3. Connect your Eaglercraft client to `ws://localhost:8081`.
 
@@ -35,14 +35,22 @@ The web UI can change the target server and check arbitrary host:port pairs. It 
 
 ## Download
 
-Prebuilt packages are on the [Releases](../../releases) page as `Eaglercraft-bridge.zip`.
+Prebuilt packages are on the [Releases](../../releases) page as `Eaglercraft-bridge.zip`. The zip contains `bridge.js`, both start scripts, this README and the license, so it unpacks straight into a runnable folder; the repository keeps the same files under `bridge/`.
+
+## Repo layout
+
+| Path | What it is |
+| --- | --- |
+| `bridge/bridge.js` | The bridge: config UI, WebSocket server, Java TCP client |
+| `bridge/start-bridge.sh`, `bridge/start-bridge.bat` | Launchers (check Node, then run `bridge.js`) |
+| `README.md`, `LICENSE` | Docs |
 
 ## Known limitations
 
 - Offline (cracked) mode only.
-- Protocol 764+ configuration-state handling is not yet tested against a live server.
-- Version below <26.2 are not tested such as 1.12.2, 1.8.8, and many other version. Feel free to make an issue for making this compatible
+- Protocol 764+ configuration-state handling is implemented (Login Acknowledged) but has not been tested against a live server.
+- Versions below 26.2 are not tested, such as 1.12.2 and 1.8.8. Feel free to make an issue for making this compatible.
 
 ## License
 
-TBD
+MIT — see [LICENSE](LICENSE).
