@@ -1,3 +1,8 @@
 node_modules/
 *.log
 .DS_Store
+
+# TLS material (never commit the private key)
+bridge-cert.pem
+bridge-key.pem
+*.pem

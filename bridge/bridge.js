@@ -1,8 +1,11 @@
+const fs = require('fs');
 const http = require('http');
+const https = require('https');
 const net = require('net');
 const zlib = require('zlib');
 const crypto = require('crypto');
 const { EventEmitter } = require('events');
+const { execFileSync } = require('child_process');
 
 // --- Minimal Zero-Dependency RFC 6455 WebSocket Server ---
 function createWebSocketServer(httpServer) {
@@ -135,11 +138,42 @@ function createWebSocketServer(httpServer) {
   return wss;
 }
 
+// Flags (--wss) are stripped so they never shift the positional arguments.
+const ARGS = process.argv.slice(2).filter((arg) => !arg.startsWith('--'));
 const BIND_HOST = process.env.BIND_HOST || '127.0.0.1'; // set BIND_HOST=0.0.0.0 for LAN access
-const WS_PORT = parseInt(process.env.WS_PORT || process.argv[2] || '8081', 10);
-let MC_HOST = process.env.MC_HOST || process.argv[3] || '127.0.0.1';
-let MC_PORT = parseInt(process.env.MC_PORT || process.argv[4] || '25565', 10);
-let PROTOCOL_VERSION = parseInt(process.env.MC_PROTOCOL || process.argv[5] || '777', 10); // 777 = 26.2/26.3
+const WS_PORT = parseInt(process.env.WS_PORT || ARGS[0] || '8081', 10);
+let MC_HOST = process.env.MC_HOST || ARGS[1] || '127.0.0.1';
+let MC_PORT = parseInt(process.env.MC_PORT || ARGS[2] || '25565', 10);
+let PROTOCOL_VERSION = parseInt(process.env.MC_PROTOCOL || ARGS[3] || '777', 10); // 777 = 26.2/26.3
+
+// Older clients (1.8.8/1.12.2 builds) only accept wss:// addresses, so the
+// bridge can terminate TLS itself: WSS=1 ./start-bridge.sh 8081 (or --wss).
+const USE_WSS = process.argv.includes('--wss') || /^(1|true|yes|on)$/i.test(String(process.env.WSS || ''));
+const CERT_FILE = process.env.CERT_FILE || 'bridge-cert.pem';
+const KEY_FILE = process.env.KEY_FILE || 'bridge-key.pem';
+
+function loadTlsMaterial() {
+  if (fs.existsSync(CERT_FILE) && fs.existsSync(KEY_FILE)) {
+    return { key: fs.readFileSync(KEY_FILE), cert: fs.readFileSync(CERT_FILE) };
+  }
+  console.log('WSS enabled and no certificate found; generating a self-signed one...');
+  try {
+    execFileSync('openssl', [
+      'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-sha256',
+      '-keyout', KEY_FILE, '-out', CERT_FILE, '-days', '3650',
+      '-subj', '/CN=localhost',
+      '-addext', 'subjectAltName=DNS:localhost,IP:127.0.0.1,IP:::1',
+    ], { stdio: 'pipe' });
+    console.log(`  wrote ${CERT_FILE} and ${KEY_FILE}`);
+    return { key: fs.readFileSync(KEY_FILE), cert: fs.readFileSync(CERT_FILE) };
+  } catch (err) {
+    console.error('Could not create a certificate with openssl (is it installed?).');
+    console.error(`Provide ${CERT_FILE} and ${KEY_FILE} yourself, or set CERT_FILE / KEY_FILE.`);
+    const detail = String((err && (err.stderr || err.message)) || '').trim().split('\n')[0];
+    if (detail) console.error(detail);
+    process.exit(1);
+  }
+}
 
 // --- VarInt helpers ---
 function readVarInt(buf, offset = 0) {
@@ -241,7 +275,7 @@ const UI_HTML = `<!doctype html>
   </div>
 </div>
 <script>
-  const wsUrl = 'ws://' + location.host;
+  const wsUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host;
   document.getElementById('wsUrl').textContent = wsUrl;
   fetch('/api/config').then(r => r.json()).then(c => {
     document.getElementById('host').value = c.mcHost;
@@ -277,7 +311,7 @@ const UI_HTML = `<!doctype html>
 </html>`;
 
 // --- HTTP + WebSocket Server ---
-const server = http.createServer((req, res) => {
+const requestHandler = (req, res) => {
   if (req.method === 'GET' && req.url === '/') {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     res.end(UI_HTML);
@@ -319,15 +353,24 @@ const server = http.createServer((req, res) => {
     res.writeHead(404);
     res.end('Not found');
   }
-});
+};
+
+const server = USE_WSS
+  ? https.createServer(loadTlsMaterial(), requestHandler)
+  : http.createServer(requestHandler);
 
 const wss = createWebSocketServer(server);
 
 server.listen(WS_PORT, BIND_HOST, () => {
+  const webScheme = USE_WSS ? 'https' : 'http';
+  const wsScheme = USE_WSS ? 'wss' : 'ws';
   console.log(`Eaglercraft WS <-> Java TCP Bridge`);
-  console.log(`  Web UI       : http://localhost:${WS_PORT}  <-- Open this in your browser!`);
-  console.log(`  WebSocket    : ws://localhost:${WS_PORT} (bound to ${BIND_HOST})`);
+  console.log(`  Web UI       : ${webScheme}://localhost:${WS_PORT}  <-- Open this in your browser!`);
+  console.log(`  WebSocket    : ${wsScheme}://localhost:${WS_PORT} (bound to ${BIND_HOST})`);
   console.log(`  Target Java  : ${MC_HOST}:${MC_PORT} (protocol ${PROTOCOL_VERSION})`);
+  if (USE_WSS) {
+    console.log(`  TLS          : self-signed cert - open the Web UI and accept the warning once`);
+  }
   console.log(`  Note: Target Java server must have online-mode=false`);
 });
 

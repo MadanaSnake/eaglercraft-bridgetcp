@@ -28,6 +28,29 @@ These can be set as environment variables when launching `bridge.js` directly. T
 | `MC_PORT` | `25565` | Java server port |
 | `MC_PROTOCOL` | `777` | Protocol version (777 = 26.2/26.3) |
 | `BIND_HOST` | `127.0.0.1` | Interface to listen on. Use `0.0.0.0` for LAN access |
+| `WSS` | unset | `1` serves HTTPS + `wss://` instead of HTTP + `ws://` |
+| `CERT_FILE` | `bridge-cert.pem` | TLS certificate (generated on first `WSS=1` run) |
+| `KEY_FILE` | `bridge-key.pem` | TLS private key |
+
+## Older clients need wss://
+
+26.2/26.3 accept a plain `ws://localhost:8081` address. The 1.8.8 and 1.12.2 builds only accept `wss://`, so the bridge can terminate TLS itself:
+
+```bash
+WSS=1 ./start-bridge.sh 8081          # Linux/macOS
+set WSS=1 && start-bridge.bat 8081    # Windows
+```
+
+On the first run it writes `bridge-cert.pem` and `bridge-key.pem` next to `bridge.js` (self-signed, `CN=localhost`, valid for `localhost`, `127.0.0.1` and `::1`). No browser trusts that certificate, so open `https://localhost:8081` once and accept the warning, then set the server address to `wss://localhost:8081`. Passing `--wss` works too (`node bridge.js 8081 --wss`), and the web UI shows a `wss://` address when TLS is on.
+
+A certificate you already trust removes the warning — for example with `mkcert`:
+
+```bash
+mkcert -install && mkcert localhost 127.0.0.1 ::1
+CERT_FILE=localhost+2.pem KEY_FILE=localhost+2-key.pem WSS=1 ./start-bridge.sh 8081
+```
+
+Certificate files are gitignored; never commit the private key.
 
 ## Security
 
@@ -49,7 +72,7 @@ Prebuilt packages are on the [Releases](../../releases) page as `Eaglercraft-bri
 
 - Offline (cracked) mode only.
 - Protocol 764+ configuration-state handling is implemented (Login Acknowledged) but has not been tested against a live server.
-- Versions below 26.2 are not tested, such as 1.12.2 and 1.8.8. Feel free to make an issue for making this compatible.
+- Versions below 26.2 are not tested, such as 1.12.2 and 1.8.8. Those builds only accept `wss://`, so start the bridge with `WSS=1` (see above) if you want to try them.
 
 ## License
 
