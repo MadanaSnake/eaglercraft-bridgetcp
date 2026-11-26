@@ -48,10 +48,10 @@ WSS=1 ./start-bridge.sh 8081  # same, plus wss:// on 8082
 | This repo's 26.2/26.3 builds (served over https by GitHub Pages) | `ws://127.0.0.1:8081` | browsers treat `localhost`/`127.0.0.1` as trustworthy, so `ws://` is not blocked as mixed content |
 | The same builds, or any other 26.2/26.3 | `wss://127.0.0.1:8082` | works once the certificate is trusted |
 | eaglercraft.com 1.12.2 download | `wss://127.0.0.1:8082` | confirmed working — set the protocol to `340` in the config UI |
-| eaglercraft.com 1.8.8 download | — | not tested |
+| eaglercraft.com 1.8.8 download | `wss://127.0.0.1:8082` | confirmed working — protocol `47`; retry once if the first handshake times out |
 | Any client, any machine, no local certificate | `wss://<tunnel-host>` | see the tunnel section below |
 
-The 26.2/26.3 builds from [fast-eaglercraft](https://github.com/MadanaSnake/fast-eaglercraft) and the official 1.12.2 download are both confirmed against this bridge. The config page lists both addresses with copy buttons, and the bridge ignores the WebSocket `Origin` header, so a page served from any origin connects the same way.
+The 26.2/26.3 builds from [fast-eaglercraft](https://github.com/MadanaSnake/fast-eaglercraft) and both official downloads (1.12.2 on protocol `340`, 1.8.8 on protocol `47`) are confirmed against this bridge. The config page lists both addresses with copy buttons, and the bridge ignores the WebSocket `Origin` header, so a page served from any origin connects the same way.
 
 ### Making the certificate trusted
 
