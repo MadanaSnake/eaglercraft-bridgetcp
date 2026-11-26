@@ -36,27 +36,27 @@ These can be set as environment variables when launching `bridge.js` directly. T
 
 ## Which address does each client use?
 
-Plain HTTP/WS always runs on `WS_PORT` (`ws://127.0.0.1:8081`). With `WSS=1` the same process *also* serves HTTPS + `wss://` on `WSS_PORT`, default `WS_PORT + 1` (`wss://127.0.0.1:8082`), so one bridge covers every client:
+Plain HTTP/WS always runs on `WS_PORT` (`ws://127.0.0.1:8081`). With `WSS=1` the same process *also* serves HTTPS + `wss://` on `WSS_PORT`, default `WS_PORT + 1` (`wss://127.0.0.1:8082`), so both connection styles are served by one process:
 
 ```bash
 ./start-bridge.sh 8081        # 26.2/26.3 over ws://
-WSS=1 ./start-bridge.sh 8081  # 26.2/26.3 over ws:// and 1.8.8/1.12.2 over wss://
+WSS=1 ./start-bridge.sh 8081  # same, plus wss:// on 8082
 ```
 
 | Client | Address | Why |
 | --- | --- | --- |
 | This repo's 26.2/26.3 builds (served over https by GitHub Pages) | `ws://127.0.0.1:8081` | browsers treat `localhost`/`127.0.0.1` as trustworthy, so `ws://` is not blocked as mixed content |
 | The same builds, or any other 26.2/26.3 | `wss://127.0.0.1:8082` | works once the certificate is trusted |
-| eaglercraft.com 1.8.8 / 1.12.2 | `wss://127.0.0.1:8082` | those clients reject anything that is not `wss://` |
+| eaglercraft.com 1.8.8 / 1.12.2 downloads | not supported | tested: the official client does not connect to the bridge, with or without TLS |
 | Any client, any machine, no local certificate | `wss://<tunnel-host>` | see the tunnel section below |
 
-The config page lists both addresses with copy buttons, and the bridge ignores the WebSocket `Origin` header, so pages served from `eaglercraft.com` or GitHub Pages connect the same way.
+Use the builds from [fast-eaglercraft](https://github.com/MadanaSnake/fast-eaglercraft) for the 26.2/26.3 path; those are the ones confirmed against this bridge. The config page lists both addresses with copy buttons, and the bridge ignores the WebSocket `Origin` header, so a page served from any origin connects the same way.
 
 ### Making the certificate trusted
 
 `wss://` fails during the handshake if the browser does not trust the certificate, and the game only shows a generic connection error. Two ways around it:
 
-- **`mkcert`** — if it is installed, the bridge uses it automatically on the first run (`mkcert -install` once, then restart the bridge). No warning, both client families work.
+- **`mkcert`** — if it is installed, the bridge uses it automatically on the first run (`mkcert -install` once, then restart the bridge). No warning.
 - **Click-through** — otherwise the bridge writes a self-signed `bridge-cert.pem` / `bridge-key.pem`. Open `https://127.0.0.1:8082` once and accept the warning; that exception covers `wss://` to the same host and port.
 
 Certificate files are gitignored; never commit the private key.
