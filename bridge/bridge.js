@@ -144,7 +144,10 @@ const BIND_HOST = process.env.BIND_HOST || '127.0.0.1'; // set BIND_HOST=0.0.0.0
 const WS_PORT = parseInt(process.env.WS_PORT || ARGS[0] || '8081', 10);
 let MC_HOST = process.env.MC_HOST || ARGS[1] || '127.0.0.1';
 let MC_PORT = parseInt(process.env.MC_PORT || ARGS[2] || '25565', 10);
-let PROTOCOL_VERSION = parseInt(process.env.MC_PROTOCOL || ARGS[3] || '777', 10); // 777 = 26.2/26.3
+// Protocol the bridge writes into the Java handshake. The config page offers
+// presets for Eaglercraft 26.3 (777), 26.2 (776), 1.12.2 (340) and 1.8.8 (47),
+// plus a custom number; MC_PROTOCOL / the 4th argument only set the initial value.
+let PROTOCOL_VERSION = parseInt(process.env.MC_PROTOCOL || ARGS[3] || '777', 10);
 
 // The plain HTTP/WS listener always runs: 26.2/26.3 accept ws://, and browsers
 // exempt localhost from mixed-content blocking. WSS=1 adds a second, TLS
@@ -261,11 +264,20 @@ const UI_HTML = `<!doctype html>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Eaglercraft <-> Java Bridge</title>
 <style>
-  body { font-family: system-ui, sans-serif; background: #12141a; color: #e6edf3; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; }
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, sans-serif; background: #12141a; color: #e6edf3; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; padding: 24px 16px; }
+  .lede { font-size: 0.85rem; line-height: 1.45; color: #8b949e; margin: 8px 0 16px; }
+  .lede code, footer code { color: #8b949e; background: #0d1117; padding: 1px 4px; border-radius: 4px; }
+  .row { display: flex; gap: 8px; }
+  .row > div { flex: 1; }
+  .row > div:first-child { flex: 2; }
   .card { background: #1b1f27; border: 1px solid #30363d; border-radius: 10px; padding: 24px; width: 100%; max-width: 420px; box-shadow: 0 8px 24px rgba(0,0,0,0.4); }
-  h1 { font-size: 1.2rem; margin: 0 0 16px; color: #58a6ff; }
+  h1 { font-size: 1.2rem; margin: 0; color: #58a6ff; }
   label { display: block; font-size: 0.85rem; color: #8b949e; margin: 12px 0 4px; }
-  input { width: 100%; box-sizing: border-box; padding: 9px 10px; border-radius: 6px; border: 1px solid #30363d; background: #0d1117; color: #e6edf3; font-size: 0.95rem; }
+  input, select { width: 100%; box-sizing: border-box; padding: 9px 10px; border-radius: 6px; border: 1px solid #30363d; background: #0d1117; color: #e6edf3; font-size: 0.95rem; font-family: inherit; }
+  input:focus, select:focus { outline: none; border-color: #1f6feb; }
+  footer { margin-top: 18px; font-size: 0.72rem; color: #6e7681; line-height: 1.5; }
+  .status.err { color: #ff7b72; }
   .hint { font-size: 0.75rem; color: #8b949e; margin-top: 4px; }
   button { margin-top: 16px; width: 100%; padding: 10px; border: 0; border-radius: 6px; background: #238636; color: #fff; font-weight: 600; font-size: 0.95rem; cursor: pointer; }
   button:hover { background: #2ea043; }
@@ -278,13 +290,16 @@ const UI_HTML = `<!doctype html>
 <body>
 <div class="card">
   <h1>Eaglercraft &harr; Java TCP Bridge</h1>
-  <label>Target Java Server IP / Domain</label>
-  <input id="host" placeholder="e.g. play.pika-network.net">
-  <label>Target Java Server Port</label>
-  <input id="port" type="number" placeholder="25565">
-  <label>Minecraft Protocol Version</label>
-  <input id="proto" type="number" placeholder="777">
-  <div class="hint">Hints: 26.2/26.3 = 777 | 1.21.4 = 769 | 1.20.1 = 763 | 1.8.8 = 47</div>
+  <p class="lede">Relays an Eaglercraft client to a real Java Minecraft server over WebSocket. Point it at a server running with <code>online-mode=false</code>, pick the protocol your client speaks, then connect the game to an address below. Changes apply immediately, no restart.</p>
+  <label>Java server address and port</label>
+  <div class="row">
+    <div><input id="host" placeholder="play.example.net"></div>
+    <div><input id="port" type="number" min="1" max="65535" placeholder="25565"></div>
+  </div>
+  <label>Client version / Minecraft protocol</label>
+  <select id="protoPreset"></select>
+  <input id="protoCustom" type="number" min="1" max="65535" placeholder="Custom protocol, e.g. 763" style="display:none;margin-top:8px;">
+  <div class="hint" id="protoHint"></div>
   <div style="display:flex;gap:8px;margin-top:16px;">
     <button style="margin-top:0;" onclick="save()">Save &amp; Apply</button>
     <button style="margin-top:0;background:#1f6feb;" onclick="testPing()">Test Ping</button>
@@ -302,19 +317,74 @@ const UI_HTML = `<!doctype html>
     <span>Game page: <a href="/play" style="color:#7ee787;">/play</a></span>
     <button class="copy-btn" onclick="window.open('/play', '_blank')">Open</button>
   </div>
+  <footer>The Java server must run with <code>online-mode=false</code>. Browsers treat <code>127.0.0.1</code> as local and secure, so an https game page can still reach the plain <code>ws://</code> address.</footer>
 </div>
 <script>
+  const PRESETS = [
+    { protocol: 777, label: 'Eaglercraft 26.3 (protocol 777)' },
+    { protocol: 776, label: 'Eaglercraft 26.2 (protocol 776)' },
+    { protocol: 340, label: 'Eaglercraft 1.12.2 (protocol 340)' },
+    { protocol: 47, label: 'Eaglercraft 1.8.8 (protocol 47)' }
+  ];
+  const presetSelect = document.getElementById('protoPreset');
+  const customInput = document.getElementById('protoCustom');
+  const known = {};
+
+  PRESETS.forEach((p) => {
+    const opt = document.createElement('option');
+    opt.value = String(p.protocol);
+    opt.textContent = p.label;
+    presetSelect.appendChild(opt);
+    known[p.protocol] = true;
+  });
+  const customOption = document.createElement('option');
+  customOption.value = 'custom';
+  customOption.textContent = 'Custom protocol...';
+  presetSelect.appendChild(customOption);
+
+  document.getElementById('protoHint').textContent =
+    'Presets: 26.3 = 777, 26.2 = 776, 1.12.2 = 340, 1.8.8 = 47. ' +
+    'The value goes into the Java handshake, so it has to match the client exactly.';
+
+  function selectedProtocol() {
+    if (presetSelect.value !== 'custom') return parseInt(presetSelect.value, 10);
+    return parseInt(customInput.value, 10);
+  }
+
+  function setProtocol(value) {
+    const protocol = parseInt(value, 10);
+    if (known[protocol]) {
+      presetSelect.value = String(protocol);
+      customInput.style.display = 'none';
+      return;
+    }
+    presetSelect.value = 'custom';
+    customInput.style.display = 'block';
+    customInput.value = Number.isFinite(protocol) ? String(protocol) : '';
+  }
+
+  function setStatus(text, isError) {
+    const el = document.getElementById('status');
+    el.textContent = text;
+    el.className = isError ? 'status err' : 'status';
+  }
+
+  presetSelect.addEventListener('change', () => {
+    customInput.style.display = presetSelect.value === 'custom' ? 'block' : 'none';
+    if (presetSelect.value === 'custom') customInput.focus();
+  });
+
   let wsUrl = 'ws://' + location.hostname + ':' + location.port;
   document.getElementById('wsUrl').textContent = wsUrl;
   function copyUrl(id) {
     const value = document.getElementById(id).textContent;
     navigator.clipboard.writeText(value);
-    document.getElementById('status').textContent = 'Copied ' + value;
+    setStatus('Copied ' + value);
   }
   fetch('/api/config').then(r => r.json()).then(c => {
     document.getElementById('host').value = c.mcHost;
     document.getElementById('port').value = c.mcPort;
-    document.getElementById('proto').value = c.protocolVersion;
+    setProtocol(c.protocolVersion);
     wsUrl = 'ws://' + location.hostname + ':' + c.wsPort;
     document.getElementById('wsUrl').textContent = wsUrl;
     if (c.wssEnabled) {
@@ -324,24 +394,27 @@ const UI_HTML = `<!doctype html>
     if (c.playUrl) document.getElementById('playBox').style.display = 'flex';
   });
   function save() {
+    const protocol = selectedProtocol();
+    if (!protocol) { setStatus('Pick a client version or type a protocol between 1 and 65535', true); return; }
+    setStatus('Saving...');
     fetch('/api/config', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        mcHost: document.getElementById('host').value.trim() || '127.0.0.1',
-        mcPort: parseInt(document.getElementById('port').value, 10) || 25565,
-        protocolVersion: parseInt(document.getElementById('proto').value, 10) || 777
+        mcHost: document.getElementById('host').value.trim(),
+        mcPort: parseInt(document.getElementById('port').value, 10),
+        protocolVersion: protocol
       })
     }).then(r => r.json()).then(c => {
-      document.getElementById('status').textContent = 'Updated: ' + c.mcHost + ':' + c.mcPort + ' (protocol ' + c.protocolVersion + ')';
-    });
+      if (c.error) { setStatus('Save failed: ' + c.error, true); return; }
+      setStatus('Updated: ' + c.mcHost + ':' + c.mcPort + ' (protocol ' + c.protocolVersion + ')');
+    }).catch(() => setStatus('Save request failed', true));
   }
   function testPing() {
-    const st = document.getElementById('status');
-    st.textContent = 'Pinging...';
+    setStatus('Pinging...');
     fetch('/api/ping').then(r => r.json()).then(p => {
-      st.textContent = p.ok ? ('Ping to ' + p.host + ':' + p.port + ' = ' + p.pingMs + ' ms') : ('Ping failed: ' + p.error);
-    }).catch(() => { st.textContent = 'Ping request failed'; });
+      setStatus(p.ok ? ('Ping to ' + p.host + ':' + p.port + ' = ' + p.pingMs + ' ms') : ('Ping failed: ' + p.error), !p.ok);
+    }).catch(() => setStatus('Ping request failed', true));
   }
 </script>
 </body>
@@ -386,18 +459,38 @@ const requestHandler = (req, res) => {
     let body = '';
     req.on('data', (c) => (body += c));
     req.on('end', () => {
+      const fail = (message) => {
+        if (res.writableEnded) return;
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: message }));
+      };
+
+      let data;
       try {
-        const data = JSON.parse(body);
-        if (data.mcHost) MC_HOST = String(data.mcHost).trim();
-        if (data.mcPort) MC_PORT = parseInt(data.mcPort, 10) || 25565;
-        if (data.protocolVersion) PROTOCOL_VERSION = parseInt(data.protocolVersion, 10) || 777;
-        console.log(`[Config] Updated target -> ${MC_HOST}:${MC_PORT} (protocol ${PROTOCOL_VERSION})`);
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ mcHost: MC_HOST, mcPort: MC_PORT, protocolVersion: PROTOCOL_VERSION }));
+        data = JSON.parse(body);
       } catch {
-        res.writeHead(400);
-        res.end('Bad JSON');
+        return fail('Bad JSON');
       }
+
+      const host = data.mcHost === undefined ? MC_HOST : String(data.mcHost).trim();
+      const port = data.mcPort === undefined ? MC_PORT : parseInt(data.mcPort, 10);
+      const protocol = data.protocolVersion === undefined
+        ? PROTOCOL_VERSION
+        : parseInt(data.protocolVersion, 10);
+
+      if (!host) return fail('A server host is required');
+      if (!Number.isInteger(port) || port < 1 || port > 65535) return fail('Port must be 1-65535');
+      // The 0x02 handshake reply carries the protocol in two bytes, so 65535 is the ceiling.
+      if (!Number.isInteger(protocol) || protocol < 1 || protocol > 65535) {
+        return fail('Protocol must be 1-65535');
+      }
+
+      MC_HOST = host;
+      MC_PORT = port;
+      PROTOCOL_VERSION = protocol;
+      console.log(`[Config] Updated target -> ${MC_HOST}:${MC_PORT} (protocol ${PROTOCOL_VERSION})`);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ mcHost: MC_HOST, mcPort: MC_PORT, protocolVersion: PROTOCOL_VERSION }));
     });
   } else if (req.method === 'GET' && req.url === '/api/ping') {
     const start = Date.now();

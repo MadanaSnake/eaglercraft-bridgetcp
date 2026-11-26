@@ -12,7 +12,7 @@ A WebSocket-to-Java TCP bridge that lets an Eaglercraft client join a Java Minec
 ## Quick start
 
 1. Run `start-bridge.sh` (Linux/macOS) or `start-bridge.bat` (Windows). There is nothing to install.
-2. Open `http://localhost:8081` and set the target Java server's host, port, and protocol version. Changes take effect immediately, no restart needed.
+2. Open `http://localhost:8081`, enter the target Java server's host and port, then pick the client you connect with in the version dropdown — it fills in the matching Minecraft protocol. Anything not listed goes under **Custom protocol**. Changes take effect immediately, no restart.
 3. Connect your Eaglercraft client to `ws://localhost:8081`.
 
 The start scripts only accept the bridge's own port, e.g. `./start-bridge.sh 8082`. The target server is set in the web UI or with the variables below.
@@ -26,13 +26,27 @@ These can be set as environment variables when launching `bridge.js` directly. T
 | `WS_PORT` | `8081` | Port for the web UI and WebSocket |
 | `MC_HOST` | `127.0.0.1` | Java server host |
 | `MC_PORT` | `25565` | Java server port |
-| `MC_PROTOCOL` | `777` | Protocol version (777 = 26.2/26.3) |
+| `MC_PROTOCOL` | `777` | Initial protocol version (777 = 26.3, 776 = 26.2, 340 = 1.12.2, 47 = 1.8.8). The web UI overrides it |
 | `BIND_HOST` | `127.0.0.1` | Interface to listen on. Use `0.0.0.0` for LAN access |
 | `WSS` | unset | `1` adds a second, HTTPS + `wss://` listener next to the plain one |
 | `WSS_PORT` | `WS_PORT + 1` | Port for the HTTPS + `wss://` listener |
 | `CERT_FILE` | `bridge-cert.pem` | TLS certificate (generated on first `WSS=1` run) |
 | `KEY_FILE` | `bridge-key.pem` | TLS private key |
 | `CLIENT_HTML` | unset | Eaglercraft build to serve at `/play` |
+
+## Choosing the protocol version
+
+The config page's **Client version / Minecraft protocol** dropdown has one preset per client build that has been verified against the bridge, plus **Custom protocol...** for everything else. The number is written into the Java handshake and also selects the login packet layout (protocol 761+ sends the player UUID, 764+ sends Login Acknowledged), so it has to match the client exactly — otherwise the Java server kicks immediately with an outdated/mismatched client message.
+
+| Client | Protocol preset |
+| --- | --- |
+| Eaglercraft 26.3 | `777` |
+| Eaglercraft 26.2 | `776` |
+| Eaglercraft 1.12.2 (official download) | `340` |
+| Eaglercraft 1.8.8 (official download) | `47` |
+| Anything else | Custom protocol, e.g. `763` for 1.20.1 or `769` for 1.21.4 |
+
+The dropdown always reflects the protocol the bridge is currently using: a value that matches no preset shows up as **Custom protocol...** with the number filled in. Saving is refused if the host is empty or the port/protocol fall outside 1–65535.
 
 ## Which address does each client use?
 
@@ -101,8 +115,8 @@ Prebuilt packages are on the [Releases](../../releases) page as `Eaglercraft-bri
 ## Known limitations
 
 - Offline (cracked) mode only.
-- Protocol 764+ configuration-state handling is implemented (Login Acknowledged) but has not been tested against a live server.
-- Versions below 26.2 are not tested, such as 1.12.2 and 1.8.8. Those builds only accept `wss://`, so start the bridge with `WSS=1` (see above) if you want to try them.
+- Protocol 764+ configuration-state handling (Login Acknowledged) is implemented and exercised by the 26.2/26.3 builds.
+- The 1.8.8 client occasionally times out on its first handshake; reconnecting once goes through. The bridge has no timeout on the game connection itself — that timer lives in the client.
 
 ## License
 
