@@ -4,6 +4,7 @@ const https = require('https');
 const net = require('net');
 const zlib = require('zlib');
 const crypto = require('crypto');
+const path = require('path');
 const { EventEmitter } = require('events');
 const { execFileSync } = require('child_process');
 
@@ -159,7 +160,65 @@ const KEY_FILE = process.env.KEY_FILE || 'bridge-key.pem';
 
 // Optional: serve an Eaglercraft build from this server at /play, so the game
 // page and the WebSocket share one origin (no mixed content, one certificate).
+// CLIENT_HTML is a single-file build; CLIENT_DIR is a folder with index.html
+// plus its sibling payloads (classes.wasm.br, assets.epk, sounds.epk, ...).
 const CLIENT_HTML = process.env.CLIENT_HTML || '';
+const CLIENT_DIR = process.env.CLIENT_DIR ? path.resolve(process.env.CLIENT_DIR) : '';
+
+const CLIENT_MIME = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.wasm': 'application/wasm',
+  '.br': 'application/octet-stream',
+  '.epk': 'application/octet-stream',
+  '.zip': 'application/zip',
+  '.png': 'image/png',
+  '.svg': 'image/svg+xml',
+  '.ico': 'image/x-icon',
+  '.txt': 'text/plain; charset=utf-8',
+};
+
+// Streams one file out of CLIENT_DIR. Returns true when it has taken over the
+// response, false when the path doesn't resolve to a regular file inside it.
+function serveClientFile(reqUrl, res) {
+  let rel;
+  try {
+    rel = decodeURIComponent((reqUrl.split('?')[0] || '/'));
+  } catch {
+    return false;
+  }
+  if (rel === '/play' || rel === '/play/' || rel === '/play.html') rel = '/index.html';
+  else if (rel.startsWith('/play/')) rel = rel.slice('/play'.length);
+
+  let full = path.resolve(CLIENT_DIR, '.' + rel);
+  if (!full.startsWith(CLIENT_DIR + path.sep)) return false;
+
+  let stat;
+  try {
+    stat = fs.statSync(full);
+    // A directory serves its index.html, so /play and /26.2/ both work.
+    if (stat.isDirectory()) {
+      full = path.join(full, 'index.html');
+      stat = fs.statSync(full);
+    }
+  } catch {
+    return false;
+  }
+  if (!stat.isFile()) return false;
+
+  const type = CLIENT_MIME[path.extname(full).toLowerCase()] || 'application/octet-stream';
+  res.writeHead(200, {
+    'Content-Type': type,
+    'Content-Length': stat.size,
+    'Cache-Control': path.extname(full).toLowerCase() === '.html' ? 'no-store' : 'public, max-age=3600',
+  });
+  const stream = fs.createReadStream(full);
+  stream.on('error', () => res.destroy());
+  stream.pipe(res);
+  return true;
+}
 
 function tryMkcert() {
   try {
@@ -467,7 +526,15 @@ const UI_HTML = `<!doctype html>
 
 // --- HTTP + WebSocket Server ---
 const requestHandler = (req, res) => {
-  if (req.method === 'GET' && (req.url === '/play' || req.url === '/play.html') && CLIENT_HTML) {
+  const playPath = req.url === '/play' || req.url === '/play.html' || req.url.startsWith('/play/');
+  if (req.method === 'GET' && playPath && (CLIENT_DIR || CLIENT_HTML)) {
+    if (CLIENT_DIR) {
+      if (!serveClientFile(req.url, res)) {
+        res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('Not found in CLIENT_DIR: ' + req.url);
+      }
+      return;
+    }
     fs.stat(CLIENT_HTML, (err, stat) => {
       if (err || !stat.isFile()) {
         res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
@@ -483,12 +550,17 @@ const requestHandler = (req, res) => {
       stream.on('error', () => res.destroy());
       stream.pipe(res);
     });
-  } else if (req.method === 'GET' && req.url === '/') {
+    return;
+  }
+  if (req.method === 'GET' && CLIENT_DIR && req.url !== '/' && !req.url.startsWith('/api/') && serveClientFile(req.url, res)) {
+    return;
+  }
+  if (req.method === 'GET' && req.url === '/') {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     res.end(UI_HTML);
-  } else if (req.method === 'GET' && req.url === '/play' && !CLIENT_HTML) {
+  } else if (req.method === 'GET' && req.url === '/play') {
     res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
-    res.end('No client configured. Start the bridge with CLIENT_HTML=/path/to/eaglercraft.html');
+    res.end('No client configured. Start the bridge with CLIENT_DIR=/path/to/client-folder or CLIENT_HTML=/path/to/eaglercraft.html');
   } else if (req.method === 'GET' && req.url === '/api/config') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
@@ -498,7 +570,7 @@ const requestHandler = (req, res) => {
       wsPort: WS_PORT,
       wssEnabled: USE_WSS,
       wssPort: USE_WSS ? WSS_PORT : null,
-      playUrl: CLIENT_HTML ? '/play' : null,
+      playUrl: CLIENT_HTML || CLIENT_DIR ? '/play' : null,
     }));
   } else if (req.method === 'POST' && req.url === '/api/config') {
     let body = '';
@@ -579,8 +651,8 @@ console.log('Eaglercraft WS <-> Java TCP Bridge');
 console.log(`  Target Java  : ${MC_HOST}:${MC_PORT} (protocol ${PROTOCOL_VERSION})`);
 startListener(WS_PORT, false);
 if (USE_WSS) startListener(WSS_PORT, true);
-if (CLIENT_HTML) {
-  console.log(`  Game page    : /play (from CLIENT_HTML)`);
+if (CLIENT_HTML || CLIENT_DIR) {
+  console.log(`  Game page    : /play (from ${CLIENT_DIR ? 'CLIENT_DIR' : 'CLIENT_HTML'})`);
 }
 if (!USE_WSS) {
   console.log('  1.8.8/1.12.2 need wss:// - restart with WSS=1 to add a TLS listener');

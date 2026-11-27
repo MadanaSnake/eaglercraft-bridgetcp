@@ -118,7 +118,8 @@ These can be set as environment variables when launching `bridge.js` directly. T
 | `WSS_PORT` | `WS_PORT + 1` | Port for the HTTPS + `wss://` listener |
 | `CERT_FILE` | `bridge-cert.pem` | TLS certificate (generated on the first `WSS=1` run) |
 | `KEY_FILE` | `bridge-key.pem` | TLS private key |
-| `CLIENT_HTML` | unset | Eaglercraft build to serve at `/play` |
+| `CLIENT_HTML` | unset | Single-file Eaglercraft build to serve at `/play` |
+| `CLIENT_DIR` | unset | Folder to serve at `/play` (its `index.html`) and under every path |
 
 ## Serve the game from the bridge
 
@@ -129,6 +130,14 @@ CLIENT_HTML=/path/to/eaglercraft.html WSS=1 ./start-bridge.sh 8081
 ```
 
 `/play` serves that file on both listeners (streamed, so a 78 MB build is fine) and the config page gets an **Open** shortcut plus a `/play` chip. With `WSS=1`, `https://127.0.0.1:8082/play` puts the game page, the config UI and the socket on one certificate: accept the warning once, then connect the client to `wss://127.0.0.1:8082`. The plain listener also serves `http://127.0.0.1:8081/play`.
+
+Split builds keep their payloads next to the page (`classes.wasm.br`, `assets.epk`, `sounds.epk`, ...), so a single HTML file can't be served on its own. Point the bridge at the folder instead:
+
+```bash
+CLIENT_DIR=/path/to/fast-eaglercraft ./start-bridge.sh 8081
+```
+
+`/play` becomes that folder's `index.html` (the launcher), every other path resolves inside the folder — so `/26.2/` serves the split build, `/26.2/classes.wasm.br` its payloads, and `/sounds.epk` the shared one, exactly as the folder is laid out on GitHub Pages. Paths that resolve outside the folder return 404.
 
 ## Security
 
