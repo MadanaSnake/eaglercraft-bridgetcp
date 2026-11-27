@@ -139,6 +139,8 @@ CLIENT_DIR=/path/to/fast-eaglercraft ./start-bridge.sh 8081
 
 `/play` becomes that folder's `index.html` (the launcher), every other path resolves inside the folder — so `/26.2/` serves the split build, `/26.2/classes.wasm.br` its payloads, and `/sounds.epk` the shared one, exactly as the folder is laid out on GitHub Pages. Paths that resolve outside the folder return 404.
 
+You can also skip the environment variables: **Choose client...** on the config page opens a browser over this machine (folders and `.html` files only) and applies the pick immediately, so **Play** opens `/play` without a restart. Picking a folder serves everything inside it — launcher, split builds and single-file builds alike; picking one `.html` serves its folder and opens that file, so its siblings still resolve. Browsing is restricted to loopback clients, and the pick lives in memory — after a restart the bridge falls back to `CLIENT_DIR` / `CLIENT_HTML`.
+
 ## Security
 
 The web UI can change the target server and check arbitrary host:port pairs. It listens on localhost only by default. If you set `BIND_HOST=0.0.0.0`, anyone on your network can use it, so add authentication or a firewall rule first.

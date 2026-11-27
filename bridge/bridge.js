@@ -4,6 +4,7 @@ const https = require('https');
 const net = require('net');
 const zlib = require('zlib');
 const crypto = require('crypto');
+const os = require('os');
 const path = require('path');
 const { EventEmitter } = require('events');
 const { execFileSync } = require('child_process');
@@ -162,8 +163,13 @@ const KEY_FILE = process.env.KEY_FILE || 'bridge-key.pem';
 // page and the WebSocket share one origin (no mixed content, one certificate).
 // CLIENT_HTML is a single-file build; CLIENT_DIR is a folder with index.html
 // plus its sibling payloads (classes.wasm.br, assets.epk, sounds.epk, ...).
-const CLIENT_HTML = process.env.CLIENT_HTML || '';
-const CLIENT_DIR = process.env.CLIENT_DIR ? path.resolve(process.env.CLIENT_DIR) : '';
+let CLIENT_HTML = process.env.CLIENT_HTML || '';
+let CLIENT_DIR = process.env.CLIENT_DIR ? path.resolve(process.env.CLIENT_DIR) : '';
+let CLIENT_ENTRY = '';
+if (CLIENT_HTML && !CLIENT_DIR) {
+  CLIENT_DIR = path.dirname(path.resolve(CLIENT_HTML));
+  CLIENT_ENTRY = path.basename(CLIENT_HTML);
+}
 
 const CLIENT_MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -189,7 +195,7 @@ function serveClientFile(reqUrl, res) {
   } catch {
     return false;
   }
-  if (rel === '/play' || rel === '/play/' || rel === '/play.html') rel = '/index.html';
+  if (rel === '/play' || rel === '/play/' || rel === '/play.html') rel = '/' + (CLIENT_ENTRY || 'index.html');
   else if (rel.startsWith('/play/')) rel = rel.slice('/play'.length);
 
   let full = path.resolve(CLIENT_DIR, '.' + rel);
@@ -218,6 +224,24 @@ function serveClientFile(reqUrl, res) {
   stream.on('error', () => res.destroy());
   stream.pipe(res);
   return true;
+}
+
+// Choosing the client at runtime means browsing this machine's filesystem, so
+// it is restricted to loopback clients even when BIND_HOST opens the UI up.
+function isLoopback(req) {
+  const addr = req.socket.remoteAddress || '';
+  return addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1';
+}
+
+function expandUserPath(input) {
+  let out = String(input || '').trim();
+  if (out === '~' || out.startsWith('~/')) out = os.homedir() + out.slice(1);
+  return path.resolve(out);
+}
+
+function sendJson(res, obj, code = 200) {
+  res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+  res.end(JSON.stringify(obj));
 }
 
 function tryMkcert() {
@@ -351,6 +375,22 @@ const UI_HTML = `<!doctype html>
   .ws-box.warn code { color: #d29922; }
   .copy-btn { width: auto; margin: 0; padding: 4px 10px; font-size: 0.75rem; background: #30363d; }
   .status { margin-top: 10px; font-size: 0.85rem; color: #7ee787; min-height: 1.2em; }
+  button:disabled { opacity: 0.45; cursor: default; }
+  button:disabled:hover { background: #30363d; }
+  .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,0.65); display: none; align-items: center; justify-content: center; padding: 16px; z-index: 20; }
+  .modal-bg.open { display: flex; }
+  .modal { background: #1b1f27; border: 1px solid #30363d; border-radius: 10px; width: 100%; max-width: 460px; padding: 16px; }
+  .modal h2 { font-size: 0.95rem; margin: 0 0 8px; color: #e6edf3; font-weight: 600; }
+  .crumbs { font-size: 0.72rem; color: #8b949e; word-break: break-all; margin-bottom: 8px; min-height: 1em; }
+  .list { max-height: 260px; overflow: auto; border: 1px solid #30363d; border-radius: 6px; background: #0d1117; }
+  .item { padding: 7px 10px; font-size: 0.85rem; cursor: pointer; border-bottom: 1px solid #161b22; }
+  .item:last-child { border-bottom: 0; }
+  .item:hover { background: #161b22; }
+  .item.dir { color: #7ee787; }
+  .item.file { color: #58a6ff; }
+  .modal-actions { display: flex; gap: 8px; margin-top: 10px; }
+  .modal-actions button { margin-top: 0; width: auto; flex: 1; background: #30363d; color: #e6edf3; font-weight: 500; }
+  .modal-actions button:hover { background: #3d444d; }
 </style>
 </head>
 <body>
@@ -383,11 +423,29 @@ const UI_HTML = `<!doctype html>
   <div class="ws-box warn" id="wssOff" style="display:none;">
     <span>1.8.8 / 1.12.2 need <code>wss://</code> — restart the bridge with <code>WSS=1</code></span>
   </div>
-  <div class="ws-box" id="playBox" style="display:none;">
-    <span>Game page: <a href="/play" style="color:#7ee787;">/play</a></span>
-    <button class="copy-btn" onclick="window.open('/play', '_blank')">Open</button>
+  <div class="ws-box" id="clientBox" style="flex-direction:column;align-items:stretch;gap:8px;">
+    <span style="font-size:0.8rem;color:#8b949e;">Game page:
+      <code id="clientState" style="display:inline-block;max-width:70%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:bottom;color:#7ee787;">not set</code>
+    </span>
+    <div style="display:flex;gap:8px;">
+      <button class="copy-btn" style="margin:0;flex:1;background:#1f6feb;" onclick="openPicker()">Choose client...</button>
+      <button class="copy-btn" id="playBtn" style="margin:0;flex:1;background:#238636;" onclick="window.open('/play', '_blank')" disabled>Play</button>
+    </div>
   </div>
   <footer>The Java server must run with <code>online-mode=false</code>. The plain <code>ws://</code> listener is always on; <code>wss://</code>, which the 1.8.8 and 1.12.2 clients require, only exists when the bridge is started with <code>WSS=1</code>. Browsers treat <code>127.0.0.1</code> as secure, so an https game page can still reach <code>ws://</code>.</footer>
+</div>
+<div class="modal-bg" id="modal">
+  <div class="modal">
+    <h2>Choose the Eaglercraft client</h2>
+    <div class="crumbs" id="crumbs"></div>
+    <div class="list" id="list"></div>
+    <div class="modal-actions">
+      <button onclick="upDir()">Up</button>
+      <button onclick="useCurrentDir()">Use this folder</button>
+      <button onclick="closePicker()">Cancel</button>
+    </div>
+    <div class="hint">Pick the folder that holds your builds (the fast-eaglercraft repo root, or one version folder), or a single <code>.html</code> build — its folder is served either way.</div>
+  </div>
 </div>
 <script>
   const PRESETS = [
@@ -478,25 +536,95 @@ const UI_HTML = `<!doctype html>
     navigator.clipboard.writeText(value);
     setStatus('Copied ' + value);
   }
-  fetch('/api/config').then(r => r.json()).then(c => {
-    document.getElementById('host').value = c.mcHost;
-    document.getElementById('port').value = c.mcPort;
-    applyWssState(c.wssEnabled);
-    setProtocol(c.protocolVersion);
-    wsUrl = 'ws://' + location.hostname + ':' + c.wsPort;
-    document.getElementById('wsUrl').textContent = wsUrl;
-    if (c.wssEnabled) {
-      document.getElementById('wssUrl').textContent = 'wss://' + location.hostname + ':' + c.wssPort;
-      document.getElementById('wssBox').style.display = 'flex';
-    }
-    if (c.playUrl) {
-      document.getElementById('playBox').style.display = 'flex';
-    } else {
-      document.getElementById('playBox').style.display = 'none';
-    }
-    if (!c.wssEnabled) document.getElementById('wssOff').style.display = 'flex';
-    renderFlags(c);
-  });
+  function loadConfig() {
+    fetch('/api/config').then(r => r.json()).then(c => {
+      document.getElementById('host').value = c.mcHost;
+      document.getElementById('port').value = c.mcPort;
+      applyWssState(c.wssEnabled);
+      setProtocol(c.protocolVersion);
+      wsUrl = 'ws://' + location.hostname + ':' + c.wsPort;
+      document.getElementById('wsUrl').textContent = wsUrl;
+      if (c.wssEnabled) {
+        document.getElementById('wssUrl').textContent = 'wss://' + location.hostname + ':' + c.wssPort;
+        document.getElementById('wssBox').style.display = 'flex';
+      }
+      document.getElementById('playBtn').disabled = !c.playUrl;
+      if (!c.wssEnabled) document.getElementById('wssOff').style.display = 'flex';
+      renderFlags(c);
+    });
+  }
+
+  let browsePath = null;
+  let browseParent = null;
+
+  function refreshClient() {
+    fetch('/api/client').then(r => r.json()).then(c => {
+      const state = document.getElementById('clientState');
+      const label = c.path ? (c.entry ? c.path + ' -> ' + c.entry : c.path) : 'not set';
+      state.textContent = label;
+      state.title = label;
+      document.getElementById('playBtn').disabled = !c.playUrl;
+    });
+  }
+
+  function openPicker() {
+    document.getElementById('modal').classList.add('open');
+    loadDir(null);
+  }
+  function closePicker() {
+    document.getElementById('modal').classList.remove('open');
+  }
+  function upDir() {
+    if (browseParent && browseParent !== browsePath) loadDir(browseParent);
+  }
+  function useCurrentDir() {
+    if (browsePath) useClient(browsePath);
+  }
+  function joinPath(dir, name) {
+    return (dir === '/' ? '' : dir) + '/' + name;
+  }
+  function loadDir(dir) {
+    const url = '/api/browse' + (dir ? '?path=' + encodeURIComponent(dir) : '');
+    fetch(url).then(r => r.json()).then(d => {
+      if (d.error) { setStatus('Cannot open folder: ' + d.error, true); return; }
+      browsePath = d.path;
+      browseParent = d.parent;
+      document.getElementById('crumbs').textContent = d.path;
+      const list = document.getElementById('list');
+      list.textContent = '';
+      const add = (name, kind, full) => {
+        const el = document.createElement('div');
+        el.className = 'item ' + kind;
+        el.textContent = kind === 'dir' ? name + '/' : name;
+        el.addEventListener('click', () => (kind === 'dir' ? loadDir(full) : useClient(full)));
+        list.appendChild(el);
+      };
+      d.dirs.forEach(n => add(n, 'dir', joinPath(d.path, n)));
+      d.files.forEach(n => add(n, 'file', joinPath(d.path, n)));
+      if (!d.dirs.length && !d.files.length) {
+        const el = document.createElement('div');
+        el.className = 'item';
+        el.textContent = 'No folders or .html files here - go up.';
+        list.appendChild(el);
+      }
+    }).catch(() => setStatus('Browse request failed', true));
+  }
+  function useClient(path) {
+    fetch('/api/client', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path })
+    }).then(r => r.json()).then(c => {
+      if (c.error) { setStatus('Cannot use it: ' + c.error, true); return; }
+      closePicker();
+      loadConfig();
+      refreshClient();
+      setStatus('Game page: ' + c.path + (c.hasIndex === false ? ' (no index.html there yet)' : ''));
+    }).catch(() => setStatus('Request failed', true));
+  }
+
+  loadConfig();
+  refreshClient();
   function save() {
     const protocol = selectedProtocol();
     if (!protocol) { setStatus('Pick a client version or type a protocol between 1 and 65535', true); return; }
@@ -527,29 +655,11 @@ const UI_HTML = `<!doctype html>
 // --- HTTP + WebSocket Server ---
 const requestHandler = (req, res) => {
   const playPath = req.url === '/play' || req.url === '/play.html' || req.url.startsWith('/play/');
-  if (req.method === 'GET' && playPath && (CLIENT_DIR || CLIENT_HTML)) {
-    if (CLIENT_DIR) {
-      if (!serveClientFile(req.url, res)) {
-        res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
-        res.end('Not found in CLIENT_DIR: ' + req.url);
-      }
-      return;
+  if (req.method === 'GET' && playPath && CLIENT_DIR) {
+    if (!serveClientFile(req.url, res)) {
+      res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('Not found in CLIENT_DIR: ' + req.url);
     }
-    fs.stat(CLIENT_HTML, (err, stat) => {
-      if (err || !stat.isFile()) {
-        res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
-        res.end('CLIENT_HTML not found: ' + CLIENT_HTML);
-        return;
-      }
-      res.writeHead(200, {
-        'Content-Type': 'text/html; charset=utf-8',
-        'Content-Length': stat.size,
-        'Cache-Control': 'no-store',
-      });
-      const stream = fs.createReadStream(CLIENT_HTML);
-      stream.on('error', () => res.destroy());
-      stream.pipe(res);
-    });
     return;
   }
   if (req.method === 'GET' && CLIENT_DIR && req.url !== '/' && !req.url.startsWith('/api/') && serveClientFile(req.url, res)) {
@@ -570,7 +680,7 @@ const requestHandler = (req, res) => {
       wsPort: WS_PORT,
       wssEnabled: USE_WSS,
       wssPort: USE_WSS ? WSS_PORT : null,
-      playUrl: CLIENT_HTML || CLIENT_DIR ? '/play' : null,
+      playUrl: CLIENT_DIR ? '/play' : null,
     }));
   } else if (req.method === 'POST' && req.url === '/api/config') {
     let body = '';
@@ -623,6 +733,76 @@ const requestHandler = (req, res) => {
     sock.on('connect', () => done({ ok: true, pingMs: Date.now() - start, host: MC_HOST, port: MC_PORT }));
     sock.on('timeout', () => done({ ok: false, error: 'Timed out (3000ms)' }));
     sock.on('error', (err) => done({ ok: false, error: err.message }));
+  } else if (req.method === 'GET' && req.url === '/api/client') {
+    sendJson(res, {
+      kind: CLIENT_DIR ? (CLIENT_ENTRY ? 'file' : 'dir') : null,
+      path: CLIENT_DIR || null,
+      entry: CLIENT_ENTRY || null,
+      playUrl: CLIENT_DIR ? '/play' : null,
+    });
+  } else if (req.method === 'POST' && req.url === '/api/client') {
+    if (!isLoopback(req)) {
+      res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('Picking a client is restricted to loopback clients');
+      return;
+    }
+    let body = '';
+    req.on('data', (c) => (body += c));
+    req.on('end', () => {
+      let data;
+      try {
+        data = JSON.parse(body);
+      } catch {
+        return sendJson(res, { error: 'Bad JSON' }, 400);
+      }
+      const target = expandUserPath(data.path);
+      fs.stat(target, (err, stat) => {
+        if (err) return sendJson(res, { error: 'Cannot open ' + target }, 400);
+        let kind;
+        if (stat.isDirectory()) {
+          kind = 'dir';
+          CLIENT_DIR = target;
+          CLIENT_ENTRY = '';
+        } else if (stat.isFile() && /\.html?$/i.test(target)) {
+          // A single-file build still lives in a folder, so serve the folder and
+          // open the file: its siblings stay reachable and /play keeps working.
+          kind = 'file';
+          CLIENT_DIR = path.dirname(target);
+          CLIENT_ENTRY = path.basename(target);
+        } else {
+          return sendJson(res, { error: 'Pick a folder or an .html file' }, 400);
+        }
+        const hasIndex = kind === 'dir' ? fs.existsSync(path.join(target, 'index.html')) : true;
+        console.log(`[Client] Game page -> ${kind === 'dir' ? 'folder' : 'file'} ${target}`);
+        sendJson(res, { kind, path: CLIENT_DIR, entry: CLIENT_ENTRY || null, hasIndex, playUrl: '/play' });
+      });
+    });
+  } else if (req.method === 'GET' && req.url.startsWith('/api/browse')) {
+    if (!isLoopback(req)) {
+      res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('Browsing is restricted to loopback clients');
+      return;
+    }
+    let dir;
+    try {
+      const requested = new URL(req.url, 'http://localhost').searchParams.get('path');
+      dir = expandUserPath(requested || os.homedir());
+    } catch {
+      return sendJson(res, { error: 'Bad path' }, 400);
+    }
+    fs.readdir(dir, { withFileTypes: true }, (err, entries) => {
+      if (err) return sendJson(res, { error: err.code || err.message, path: dir }, 400);
+      const dirs = [];
+      const files = [];
+      for (const entry of entries) {
+        if (entry.name.startsWith('.')) continue;
+        if (entry.isDirectory()) dirs.push(entry.name);
+        else if (entry.isFile() && /\.html?$/i.test(entry.name)) files.push(entry.name);
+      }
+      dirs.sort((a, b) => a.localeCompare(b));
+      files.sort((a, b) => a.localeCompare(b));
+      sendJson(res, { path: dir, parent: path.dirname(dir), dirs, files });
+    });
   } else {
     res.writeHead(404);
     res.end('Not found');
@@ -651,8 +831,9 @@ console.log('Eaglercraft WS <-> Java TCP Bridge');
 console.log(`  Target Java  : ${MC_HOST}:${MC_PORT} (protocol ${PROTOCOL_VERSION})`);
 startListener(WS_PORT, false);
 if (USE_WSS) startListener(WSS_PORT, true);
-if (CLIENT_HTML || CLIENT_DIR) {
-  console.log(`  Game page    : /play (from ${CLIENT_DIR ? 'CLIENT_DIR' : 'CLIENT_HTML'})`);
+if (CLIENT_DIR) {
+  const source = process.env.CLIENT_HTML ? 'CLIENT_HTML' : 'CLIENT_DIR';
+  console.log(`  Game page    : /play (from ${source}${CLIENT_ENTRY ? ', entry ' + CLIENT_ENTRY : ''})`);
 }
 if (!USE_WSS) {
   console.log('  1.8.8/1.12.2 need wss:// - restart with WSS=1 to add a TLS listener');
