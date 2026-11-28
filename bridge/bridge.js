@@ -159,6 +159,17 @@ const WSS_PORT = parseInt(process.env.WSS_PORT || String(WS_PORT + 1), 10);
 const CERT_FILE = process.env.CERT_FILE || 'bridge-cert.pem';
 const KEY_FILE = process.env.KEY_FILE || 'bridge-key.pem';
 
+// online-mode=true support: the embedded Yggdrasil service below replaces
+// Mojang's session check (via authlib-injector) so the Java server can stay
+// online-mode=true. This is custom auth, not Microsoft/Mojang auth.
+const ONLINE_MODE = process.argv.includes('--online') || /^(1|true|yes|on|online)$/i.test(String(process.env.AUTH_MODE || ''));
+const AUTH_STORE = process.env.AUTH_STORE || path.join(__dirname, 'auth-accounts.json');
+let AUTH_PUBLIC_KEY = '';
+if (ONLINE_MODE) {
+  AUTH_PUBLIC_KEY = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 })
+    .publicKey.export({ type: 'spki', format: 'pem' }).toString();
+}
+
 // Optional: serve an Eaglercraft build from this server at /play, so the game
 // page and the WebSocket share one origin (no mixed content, one certificate).
 // CLIENT_HTML is a single-file build; CLIENT_DIR is a folder with index.html
@@ -340,6 +351,252 @@ function offlineUuid(username) {
   return md5;
 }
 
+function readMcString(buf, offset) {
+  const len = readVarInt(buf, offset);
+  if (!len) return null;
+  const start = offset + len.length;
+  if (start + len.value > buf.length) return null;
+  return { value: buf.subarray(start, start + len.value).toString('utf8'), length: len.length + len.value };
+}
+
+function readByteArray(buf, offset) {
+  const len = readVarInt(buf, offset);
+  if (!len) return null;
+  const start = offset + len.length;
+  if (start + len.value > buf.length) return null;
+  return { value: buf.subarray(start, start + len.value), length: len.length + len.value };
+}
+
+// The Java server hashes the server id, shared secret and public key with
+// SHA-1, then prints the digest as a signed Java BigInteger in base 16.
+function mcServerHash(serverId, secret, publicKeyDer) {
+  const digest = crypto.createHash('sha1')
+    .update(serverId, 'utf8')
+    .update(secret)
+    .update(publicKeyDer)
+    .digest();
+  let num = BigInt('0x' + digest.toString('hex'));
+  if (num >= (1n << 159n)) num -= (1n << 160n);
+  return num.toString(16);
+}
+
+// --- online-mode account store + pending joins ---
+let authAccounts = {};
+try {
+  if (fs.existsSync(AUTH_STORE)) {
+    const parsed = JSON.parse(fs.readFileSync(AUTH_STORE, 'utf8'));
+    if (parsed && typeof parsed === 'object' && parsed.accounts) authAccounts = parsed.accounts;
+  }
+} catch (err) {
+  console.warn('Could not read ' + AUTH_STORE + ': ' + err.message);
+}
+
+let authSaveWarned = false;
+function saveAuthAccounts() {
+  try {
+    fs.writeFileSync(AUTH_STORE, JSON.stringify({ accounts: authAccounts }, null, 2) + '\n');
+  } catch (err) {
+    if (!authSaveWarned) {
+      authSaveWarned = true;
+      console.warn('Could not save ' + AUTH_STORE + ': ' + err.message);
+    }
+  }
+}
+
+function authProfileFor(name) {
+  const key = String(name);
+  const existing = Object.keys(authAccounts).find((k) => k.toLowerCase() === key.toLowerCase());
+  if (!existing) {
+    authAccounts[key] = {
+      id: crypto.randomUUID().replace(/-/g, ''),
+      name: key,
+      createdAt: new Date().toISOString(),
+    };
+    saveAuthAccounts();
+  }
+  return authAccounts[existing || key];
+}
+
+function authProfileById(id) {
+  const wanted = String(id || '').toLowerCase().replace(/-/g, '');
+  for (const acc of Object.values(authAccounts)) {
+    if (String(acc.id).toLowerCase() === wanted) return acc;
+  }
+  return null;
+}
+
+function authProfileJson(acc) {
+  return { id: acc.id, name: acc.name, properties: [] };
+}
+
+const pendingJoins = new Map();
+const authTokens = new Map();
+
+function rememberJoin(serverId, profile) {
+  pendingJoins.set(String(serverId), {
+    id: profile.id,
+    name: profile.name,
+    expires: Date.now() + 60000,
+  });
+}
+
+function readJsonBody(req, callback) {
+  let body = '';
+  let tooBig = false;
+  req.on('data', (chunk) => {
+    body += chunk;
+    if (body.length > 1024 * 1024) {
+      tooBig = true;
+      req.destroy();
+    }
+  });
+  req.on('end', () => {
+    if (tooBig) return callback(new Error('Body too large'));
+    try {
+      callback(null, body ? JSON.parse(body) : {});
+    } catch {
+      callback(new Error('Bad JSON'));
+    }
+  });
+}
+
+function authError(res, status, message, error = 'ForbiddenOperationException') {
+  sendJson(res, { error, errorMessage: message }, status);
+}
+
+function authNoContent(res) {
+  res.writeHead(204);
+  res.end();
+}
+
+function handleYggdrasil(req, res) {
+  let url;
+  try {
+    url = new URL(req.url, 'http://localhost');
+  } catch {
+    return authError(res, 400, 'Bad URL', 'IllegalArgumentException');
+  }
+  let pathname = url.pathname.replace(/^\/api\/yggdrasil/, '');
+  if (!pathname) pathname = '/';
+  pathname = pathname.replace(/\/+$/, '') || '/';
+
+  if (req.method === 'GET' && pathname === '/') {
+    return sendJson(res, {
+      meta: {
+        serverName: 'Eaglercraft Bridge',
+        implementationName: 'eaglercraft-bridgetcp',
+        implementationVersion: '1.0',
+        feature: { non_email_login: true, enable_profile_key: false },
+      },
+      skinDomains: [],
+      signaturePublickey: AUTH_PUBLIC_KEY,
+    });
+  }
+
+  if (req.method === 'POST' && pathname === '/authserver/authenticate') {
+    return readJsonBody(req, (err, data) => {
+      if (err) return authError(res, 400, err.message, 'IllegalArgumentException');
+      const username = String(data.username || '').trim();
+      if (!username) return authError(res, 400, 'Username is required');
+      const profile = authProfileFor(username);
+      const accessToken = crypto.randomBytes(32).toString('hex');
+      const clientToken = String(data.clientToken || crypto.randomBytes(16).toString('hex'));
+      authTokens.set(accessToken, { profile, clientToken });
+      sendJson(res, {
+        accessToken,
+        clientToken,
+        availableProfiles: [authProfileJson(profile)],
+        selectedProfile: authProfileJson(profile),
+        user: { id: profile.id, properties: [] },
+      });
+    });
+  }
+
+  if (req.method === 'POST' && pathname === '/authserver/refresh') {
+    return readJsonBody(req, (err, data) => {
+      if (err) return authError(res, 400, err.message, 'IllegalArgumentException');
+      const token = authTokens.get(String(data.accessToken || ''));
+      if (!token) return authError(res, 403, 'Invalid token');
+      const accessToken = crypto.randomBytes(32).toString('hex');
+      authTokens.set(accessToken, { profile: token.profile, clientToken: token.clientToken });
+      authTokens.delete(String(data.accessToken));
+      sendJson(res, {
+        accessToken,
+        clientToken: token.clientToken,
+        selectedProfile: authProfileJson(token.profile),
+      });
+    });
+  }
+
+  if (req.method === 'POST' && pathname === '/authserver/validate') {
+    return readJsonBody(req, (err, data) => {
+      if (err) return authError(res, 400, err.message, 'IllegalArgumentException');
+      if (authTokens.has(String(data.accessToken || ''))) return authNoContent(res);
+      return authError(res, 403, 'Invalid token');
+    });
+  }
+
+  if (req.method === 'POST' && (pathname === '/authserver/invalidate' || pathname === '/authserver/signout')) {
+    return readJsonBody(req, (err, data) => {
+      if (err) return authError(res, 400, err.message, 'IllegalArgumentException');
+      if (pathname === '/authserver/invalidate') authTokens.delete(String(data.accessToken || ''));
+      return authNoContent(res);
+    });
+  }
+
+  if (req.method === 'POST' && pathname === '/sessionserver/session/minecraft/join') {
+    return readJsonBody(req, (err, data) => {
+      if (err) return authError(res, 400, err.message, 'IllegalArgumentException');
+      const token = authTokens.get(String(data.accessToken || ''));
+      if (!token) return authError(res, 403, 'Invalid token');
+      const selected = String(data.selectedProfile || '').toLowerCase().replace(/-/g, '');
+      if (selected && selected !== String(token.profile.id).toLowerCase()) {
+        return authError(res, 403, 'Profile does not belong to this token');
+      }
+      if (typeof data.serverId !== 'string') return authError(res, 400, 'serverId is required');
+      rememberJoin(data.serverId, token.profile);
+      authNoContent(res);
+    });
+  }
+
+  if (req.method === 'GET' && pathname === '/sessionserver/session/minecraft/hasJoined') {
+    const username = String(url.searchParams.get('username') || '');
+    const serverId = String(url.searchParams.get('serverId') || '');
+    const join = pendingJoins.get(serverId);
+    if (!join || join.expires < Date.now() || join.name.toLowerCase() !== username.toLowerCase()) {
+      if (join && join.expires < Date.now()) pendingJoins.delete(serverId);
+      return authNoContent(res);
+    }
+    return sendJson(res, { id: join.id, name: join.name, properties: [] });
+  }
+
+  if (req.method === 'GET' && pathname.startsWith('/sessionserver/session/minecraft/profile/')) {
+    const id = pathname.slice('/sessionserver/session/minecraft/profile/'.length);
+    const profile = authProfileById(id);
+    if (!profile) return authNoContent(res);
+    return sendJson(res, authProfileJson(profile));
+  }
+
+  if (req.method === 'POST' && pathname === '/api/profiles/minecraft') {
+    return readJsonBody(req, (err, data) => {
+      if (err) return authError(res, 400, err.message, 'IllegalArgumentException');
+      if (!Array.isArray(data)) return authError(res, 400, 'Expected an array of names');
+      const out = [];
+      for (const name of data.slice(0, 100)) {
+        const key = Object.keys(authAccounts).find((k) => k.toLowerCase() === String(name).toLowerCase());
+        if (key) out.push(authProfileJson(authAccounts[key]));
+      }
+      sendJson(res, out);
+    });
+  }
+
+  authError(res, 404, 'Not found', 'NotFoundException');
+}
+
+const SERVER_MODE_TEXT = ONLINE_MODE
+  ? '<code>online-mode=true</code> with authlib-injector pointed at this bridge'
+  : '<code>online-mode=false</code>';
+
 const UI_HTML = `<!doctype html>
 <html lang="en">
 <head>
@@ -432,7 +689,7 @@ const UI_HTML = `<!doctype html>
       <button class="copy-btn" id="playBtn" style="margin:0;flex:1;background:#238636;" onclick="window.open('/play', '_blank')" disabled>Play</button>
     </div>
   </div>
-  <footer>The Java server must run with <code>online-mode=false</code>. The plain <code>ws://</code> listener is always on; <code>wss://</code>, which the 1.8.8 and 1.12.2 clients require, only exists when the bridge is started with <code>WSS=1</code>. Browsers treat <code>127.0.0.1</code> as secure, so an https game page can still reach <code>ws://</code>.</footer>
+  <footer>The Java server must run with ${SERVER_MODE_TEXT}. ${ONLINE_MODE ? 'The bridge creates a profile per username; this is custom auth, not Microsoft/Mojang auth.' : ''} The plain <code>ws://</code> listener is always on; <code>wss://</code>, which the 1.8.8 and 1.12.2 clients require, only exists when the bridge is started with <code>WSS=1</code>. Browsers treat <code>127.0.0.1</code> as secure, so an https game page can still reach <code>ws://</code>.</footer>
 </div>
 <div class="modal-bg" id="modal">
   <div class="modal">
@@ -509,7 +766,8 @@ const UI_HTML = `<!doctype html>
     [
       { text: 'ws:// ' + config.wsPort, state: 'on' },
       { text: config.wssEnabled ? 'wss:// ' + config.wssPort : 'wss:// off', state: config.wssEnabled ? 'on' : 'off' },
-      { text: config.playUrl ? '/play' : '/play off', state: config.playUrl ? 'on' : 'idle' }
+      { text: config.playUrl ? '/play' : '/play off', state: config.playUrl ? 'on' : 'idle' },
+      { text: config.online ? 'auth /api/yggdrasil' : 'offline only', state: config.online ? 'on' : 'off' }
     ].forEach((chip) => {
       const el = document.createElement('span');
       el.className = 'chip ' + chip.state;
@@ -665,6 +923,10 @@ const requestHandler = (req, res) => {
   if (req.method === 'GET' && CLIENT_DIR && req.url !== '/' && !req.url.startsWith('/api/') && serveClientFile(req.url, res)) {
     return;
   }
+  if (ONLINE_MODE && req.url.startsWith('/api/yggdrasil')) {
+    handleYggdrasil(req, res);
+    return;
+  }
   if (req.method === 'GET' && req.url === '/') {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     res.end(UI_HTML);
@@ -681,6 +943,8 @@ const requestHandler = (req, res) => {
       wssEnabled: USE_WSS,
       wssPort: USE_WSS ? WSS_PORT : null,
       playUrl: CLIENT_DIR ? '/play' : null,
+      online: ONLINE_MODE,
+      authPath: ONLINE_MODE ? '/api/yggdrasil' : null,
     }));
   } else if (req.method === 'POST' && req.url === '/api/config') {
     let body = '';
@@ -838,7 +1102,14 @@ if (CLIENT_DIR) {
 if (!USE_WSS) {
   console.log('  1.8.8/1.12.2 need wss:// - restart with WSS=1 to add a TLS listener');
 }
-console.log(`  Note: Target Java server must have online-mode=false`);
+if (ONLINE_MODE) {
+  const authHost = BIND_HOST === '0.0.0.0' || BIND_HOST === '::' ? '<this-host>' : BIND_HOST;
+  console.log(`  Auth server  : http://${authHost}:${WS_PORT}/api/yggdrasil`);
+  console.log('  Start Java   : java -javaagent:authlib-injector.jar=http://127.0.0.1:' + WS_PORT + '/api/yggdrasil -jar server.jar');
+  console.log('  online-mode  : true (bridge auth, not Mojang/Microsoft auth)');
+} else {
+  console.log(`  Note: Target Java server must have online-mode=false`);
+}
 
 function handleConnection(ws, req) {
   const remote = req.socket.remoteAddress;
@@ -847,10 +1118,19 @@ function handleConnection(ws, req) {
   let tcpBuffer = Buffer.alloc(0);
   let compressionThreshold = -1;
   let username = 'Player';
+  let encryptor = null;
+  let decryptor = null;
 
   const cleanup = () => {
     if (tcpSocket && !tcpSocket.destroyed) tcpSocket.destroy();
     if (ws.readyState === ws.OPEN) ws.close();
+  };
+
+  // Everything after the encryption response goes through AES-128-CFB8. The
+  // handshake, Login Start and Encryption Response itself are still plaintext.
+  const writePacket = (buf) => {
+    if (!tcpSocket || tcpSocket.destroyed) return;
+    tcpSocket.write(encryptor ? encryptor.update(buf) : buf);
   };
 
   const connectToJavaServer = (playerName) => {
@@ -868,14 +1148,16 @@ function handleConnection(ws, req) {
       ]);
       tcpSocket.write(frameMcPacket(0x00, handshakePayload));
 
+      const profile = ONLINE_MODE ? authProfileFor(username) : null;
       const loginPayload = PROTOCOL_VERSION >= 761
-        ? Buffer.concat([writeMcString(username), offlineUuid(username)])
+        ? Buffer.concat([writeMcString(username), profile ? Buffer.from(profile.id, 'hex') : offlineUuid(username)])
         : writeMcString(username);
       tcpSocket.write(frameMcPacket(0x00, loginPayload));
     });
 
     tcpSocket.on('data', (chunk) => {
       try {
+      if (decryptor) chunk = decryptor.update(chunk);
       tcpBuffer = Buffer.concat([tcpBuffer, chunk]);
 
       while (tcpBuffer.length > 0) {
@@ -907,11 +1189,18 @@ function handleConnection(ws, req) {
               compressionThreshold = threshInfo.value;
               console.log(`[${username}] Compression threshold set to ${compressionThreshold}`);
             }
+          } else if (packetId === 0x05 && PROTOCOL_VERSION >= 766) {
+            // 1.20.5+ Cookie Request; answer with an empty cookie so login can continue.
+            const cookieKey = readMcString(packetData, idInfo.length);
+            if (cookieKey) {
+              const cookieResponse = Buffer.concat([writeMcString(cookieKey.value), Buffer.from([0])]);
+              writePacket(frameMcPacket(0x04, cookieResponse, compressionThreshold));
+            }
           } else if (packetId === 0x02) {
             state = 'PLAY';
             console.log(`[${username}] Logged in! Bridging PLAY packets.`);
             if (PROTOCOL_VERSION >= 764 && tcpSocket && !tcpSocket.destroyed) {
-              tcpSocket.write(frameMcPacket(0x03, Buffer.alloc(0), compressionThreshold));
+              writePacket(frameMcPacket(0x03, Buffer.alloc(0), compressionThreshold));
             }
             if (ws.readyState === ws.OPEN) {
               ws.send(Buffer.from([0x09]));
@@ -921,9 +1210,36 @@ function handleConnection(ws, req) {
             cleanup();
             return;
           } else if (packetId === 0x01) {
-            console.error(`[${username}] Error: Target server has online-mode=true! Set online-mode=false in server.properties.`);
-            cleanup();
-            return;
+            if (!ONLINE_MODE) {
+              console.error(`[${username}] Error: Target server has online-mode=true! Set online-mode=false in server.properties, or start the bridge with --online and authlib-injector.`);
+              cleanup();
+              return;
+            }
+            const sid = readMcString(packetData, idInfo.length);
+            const key = sid ? readByteArray(packetData, idInfo.length + sid.length) : null;
+            const token = key ? readByteArray(packetData, idInfo.length + sid.length + key.length) : null;
+            if (!sid || !key || !token) throw new Error('Malformed Encryption Request');
+
+            const serverKey = crypto.createPublicKey({ key: key.value, format: 'der', type: 'spki' });
+            const secret = crypto.randomBytes(16);
+            const encSecret = crypto.publicEncrypt(
+              { key: serverKey, padding: crypto.constants.RSA_PKCS1_PADDING }, secret);
+            const encToken = crypto.publicEncrypt(
+              { key: serverKey, padding: crypto.constants.RSA_PKCS1_PADDING }, token.value);
+            const response = Buffer.concat([
+              writeVarInt(encSecret.length), encSecret,
+              writeVarInt(encToken.length), encToken,
+            ]);
+            // The response is the last plaintext packet.
+            tcpSocket.write(frameMcPacket(0x01, response));
+
+            encryptor = crypto.createCipheriv('aes-128-cfb8', secret, secret);
+            decryptor = crypto.createDecipheriv('aes-128-cfb8', secret, secret);
+
+            const hash = mcServerHash(sid.value, secret, key.value);
+            const profile = authProfileFor(username);
+            rememberJoin(hash, profile);
+            console.log(`[${username}] online-mode login as ${profile.id.slice(0, 8)} (server hash ${hash.slice(0, 8)}...)`);
           }
         } else if (state === 'PLAY') {
           if (ws.readyState === ws.OPEN) {
@@ -994,7 +1310,8 @@ function handleConnection(ws, req) {
       } else if (pktId === 0x04) {
         const nameLen = buf[1] || 0;
         const parsedName = buf.subarray(2, 2 + nameLen).toString('utf8').replace(/[^a-zA-Z0-9_]/g, '') || 'Player';
-        const uuid = offlineUuid(parsedName);
+        const profile = ONLINE_MODE ? authProfileFor(parsedName) : null;
+        const uuid = profile ? Buffer.from(profile.id, 'hex') : offlineUuid(parsedName);
 
         const nameBuf = Buffer.from(parsedName, 'utf8');
         const allowPkt = Buffer.concat([Buffer.from([0x05, nameBuf.length]), nameBuf, uuid]);
@@ -1009,13 +1326,13 @@ function handleConnection(ws, req) {
         if (buf.length >= compressionThreshold) {
           const compressed = zlib.deflateSync(buf);
           const inner = Buffer.concat([writeVarInt(buf.length), compressed]);
-          tcpSocket.write(Buffer.concat([writeVarInt(inner.length), inner]));
+          writePacket(Buffer.concat([writeVarInt(inner.length), inner]));
         } else {
           const inner = Buffer.concat([writeVarInt(0), buf]);
-          tcpSocket.write(Buffer.concat([writeVarInt(inner.length), inner]));
+          writePacket(Buffer.concat([writeVarInt(inner.length), inner]));
         }
       } else {
-        tcpSocket.write(Buffer.concat([lenBuf, buf]));
+        writePacket(Buffer.concat([lenBuf, buf]));
       }
     }
   });

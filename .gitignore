@@ -6,3 +6,6 @@ node_modules/
 bridge-cert.pem
 bridge-key.pem
 *.pem
+
+# online-mode account profiles (UUIDs are local to this bridge)
+auth-accounts.json

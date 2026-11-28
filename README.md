@@ -22,12 +22,12 @@ No `npm install`, no build step: the WebSocket layer (RFC 6455) is written into 
    - 26.2 / 26.3 clients -> `ws://127.0.0.1:8081`
    - 1.8.8 / 1.12.2 clients -> `wss://127.0.0.1:8082`, which needs the bridge started with `WSS=1` (see [Starting the bridge](#starting-the-bridge))
 
-Two things cause almost every failure: the Java server is still on `online-mode=true`, or the version picked in the page is not the version of the client you are connecting with.
+Two things cause almost every failure: the Java server's `online-mode` does not match how the bridge was started, or the version picked in the page is not the version of the client you are connecting with.
 
 ## What you need
 
 - **[Node.js](https://nodejs.org) 14 or newer** - any current LTS is fine.
-- **A Java Minecraft server you can join**, with `online-mode=false` in `server.properties`, restarted afterwards. The bridge only speaks offline (cracked) mode; there is no Mojang/Microsoft login handshake.
+- **A Java Minecraft server you can join.** For a cracked/offline server, set `online-mode=false` in `server.properties` and restart it. For `online-mode=true`, use the [online-mode addon](#online-modetrue-with-authlib-injector) below: it keeps `online-mode=true` and gives the bridge its own small Yggdrasil auth service.
 - **An Eaglercraft client**: the [fast-eaglercraft](https://github.com/MadanaSnake/fast-eaglercraft) 26.2 / 26.3 builds, or the official 1.12.2 / 1.8.8 downloads.
 
 ## Connect your client
@@ -71,6 +71,25 @@ $env:WSS=1; .\start-bridge.bat
 
 The positional argument is always the bridge's own port; the target server is set in the web UI (or with the variables below).
 
+### `online-mode=true` with authlib-injector
+
+The bridge can host the session server instead of Mojang. Keep `online-mode=true` in `server.properties`, start the bridge with `--online`, and launch the Java server with [authlib-injector](https://github.com/yushijinhun/authlib-injector/releases) pointed at the bridge:
+
+```bash
+# 1. bridge (creates a profile per Eaglercraft username)
+./start-bridge.sh 8081 --online
+# Windows: start-bridge.bat 8081 --online
+
+# 2. Java server, same machine, in its own terminal
+java -javaagent:authlib-injector.jar=http://127.0.0.1:8081/api/yggdrasil -jar server.jar nogui
+```
+
+`authlib-injector.jar` is a separate download; put it next to `server.jar`. The URL must be the **plain HTTP** listener (`8081`, even when `WSS=1`). The Java server has to reach it, and the bridge must already be running when the server starts. authlib-injector prints an "HTTP is INSECURE" warning; that is expected on loopback.
+
+The first time a username connects, the bridge creates an account and UUID in `auth-accounts.json` next to `bridge.js`. Delete that file to reset every UUID. Works with 1.8.8, 1.12.2, 26.2 and 26.3 as long as the authlib-injector release supports that server version - use the latest.
+
+This is **not Mojang or Microsoft authentication**. It makes `online-mode=true` satisfy its session check with profiles issued by the bridge, so it is only as private as access to the bridge. Keep it on `127.0.0.1` (the default) or firewall the port. For 1.19+ servers, add `enforce-secure-profile=false` to `server.properties` if clients are kicked for chat/profile signatures.
+
 ### Why 1.8.8 / 1.12.2 need `wss://`
 
 The official 1.8.8 and 1.12.2 builds only connect over TLS, while Eaglercraft 26.2 / 26.3 happily use plain `ws://127.0.0.1:8081` because browsers treat `localhost` / `127.0.0.1` as trustworthy and do not block it as mixed content. That is the whole reason for the second listener: `WSS=1` serves both styles from one process.
@@ -99,7 +118,8 @@ Use the `https://….trycloudflare.com` hostname it prints as `wss://<host>` in 
 | What you see | What to do |
 | --- | --- |
 | `Ping failed: Timed out (3000ms)` in the page | Wrong address/port, server offline, or a firewall/VPN in the way. Fix this first - nothing else works until ping succeeds. |
-| Kicked for authentication / `online-mode` | Set `online-mode=false` in `server.properties` and restart the Java server. |
+| Kicked for authentication / `online-mode` | Set `online-mode=false` and restart the Java server, **or** use the [online-mode addon](#online-modetrue-with-authlib-injector) and start the bridge with `--online`. Do not mix the two. |
+| `--online` but still "Invalid session" | The Java server must start with `-javaagent:authlib-injector.jar=http://127.0.0.1:8081/api/yggdrasil`, the bridge must already be running, and the URL must end in `/api/yggdrasil`. |
 | Kicked as outdated, or disconnected right after joining | The version in the dropdown is not the client's version. Use the matching preset, or **Custom protocol...**. |
 | 1.8.8 / 1.12.2 do not connect at all | Start with `WSS=1` and use `wss://127.0.0.1:8082`. Accept the certificate warning once at `https://127.0.0.1:8082`. |
 | 1.8.8 times out on the first try, works after | Known client-side quirk: press connect again. The bridge itself has no timeout on the game connection. |
@@ -118,6 +138,8 @@ These can be set as environment variables when launching `bridge.js` directly. T
 | `MC_PROTOCOL` | `777` | Initial protocol version (777 = 26.3, 776 = 26.2, 340 = 1.12.2, 47 = 1.8.8). The web UI overrides it |
 | `BIND_HOST` | `127.0.0.1` | Interface to listen on. Use `0.0.0.0` for LAN access |
 | `WSS` | unset | `1` adds a second, HTTPS + `wss://` listener next to the plain one |
+| `AUTH_MODE` | unset | `online` is the same as `--online`: enable the embedded Yggdrasil/session service |
+| `AUTH_STORE` | `auth-accounts.json` | Where the online-mode account/UUID store lives |
 | `WSS_PORT` | `WS_PORT + 1` | Port for the HTTPS + `wss://` listener |
 | `CERT_FILE` | `bridge-cert.pem` | TLS certificate (generated on the first `WSS=1` run) |
 | `KEY_FILE` | `bridge-key.pem` | TLS private key |
@@ -162,7 +184,8 @@ Prebuilt packages are on the [Releases](../../releases) page as `Eaglercraft-bri
 
 ## Known limitations
 
-- Offline (cracked) mode only.
+- **Not Mojang/Microsoft authentication.** The optional `--online` mode is custom auth: the bridge issues a profile per Eaglercraft username and answers the server's session check itself. Anyone who can reach the bridge can claim a username, so keep it on loopback or behind a firewall.
+- Online mode needs a separate `authlib-injector.jar` and a Java server version that authlib-injector supports; the bridge does not bundle it.
 - Protocol 764+ configuration-state handling (Login Acknowledged) is implemented and exercised by the 26.2/26.3 builds.
 - The 1.8.8 client occasionally times out on its first handshake; reconnecting once goes through. The bridge has no timeout on the game connection itself - that timer lives in the client.
 

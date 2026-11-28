@@ -20,5 +20,5 @@ if "%WS_PORT%"=="" set "WS_PORT=8081"
 echo Bridge is starting! Open the URL(s) it prints below to configure.
 echo Press Ctrl+C to stop.
 echo.
-node bridge.js "%WS_PORT%" %2
+node bridge.js "%WS_PORT%" %2 %3 %4 %5
 pause
