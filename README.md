@@ -73,7 +73,7 @@ The positional argument is always the bridge's own port; the target server is se
 
 ### `online-mode=true` with authlib-injector
 
-The bridge can host the session server instead of Mojang. Keep `online-mode=true` in `server.properties`, start the bridge with `--online`, and launch the Java server with [authlib-injector](https://github.com/yushijinhun/authlib-injector/releases) pointed at the bridge:
+The base bridge is offline-only. `--online` loads the optional `online-mode.js` addon, which hosts the session server instead of Mojang. Keep `online-mode=true` in `server.properties`, start the bridge with `--online`, and launch the Java server with [authlib-injector](https://github.com/yushijinhun/authlib-injector/releases) pointed at the bridge:
 
 ```bash
 # 1. bridge (creates a profile per Eaglercraft username)
@@ -89,6 +89,8 @@ java -javaagent:authlib-injector.jar=http://127.0.0.1:8081/api/yggdrasil -jar se
 The first time a username connects, the bridge creates an account and UUID in `auth-accounts.json` next to `bridge.js`. Delete that file to reset every UUID. Works with 1.8.8, 1.12.2, 26.2 and 26.3 as long as the authlib-injector release supports that server version - use the latest.
 
 This is **not Mojang or Microsoft authentication**. It makes `online-mode=true` satisfy its session check with profiles issued by the bridge, so it is only as private as access to the bridge. Keep it on `127.0.0.1` (the default) or firewall the port. For 1.19+ servers, add `enforce-secure-profile=false` to `server.properties` if clients are kicked for chat/profile signatures.
+
+It also cannot be used on a public server such as Hypixel: you cannot install authlib-injector there. A real Microsoft-account login proxy for those servers would be a separate feature, not part of this addon.
 
 ### Why 1.8.8 / 1.12.2 need `wss://`
 
@@ -172,13 +174,14 @@ The web UI can change the target server and check arbitrary host:port pairs. It 
 
 ## Download
 
-Prebuilt packages are on the [Releases](../../releases) page as `Eaglercraft-bridge.zip`. The zip contains `bridge.js`, both start scripts, this README and the license, so it unpacks straight into a runnable folder; the repository keeps the same files under `bridge/`.
+Prebuilt packages are on the [Releases](../../releases) page as `Eaglercraft-bridge.zip`. The zip contains `bridge.js`, `online-mode.js`, both start scripts, this README and the license, so it unpacks straight into a runnable folder; the repository keeps the same files under `bridge/`.
 
 ## Repo layout
 
 | Path | What it is |
 | --- | --- |
 | `bridge/bridge.js` | The bridge: config UI, WebSocket server, Java TCP client |
+| `bridge/online-mode.js` | Optional `--online` addon: Yggdrasil/session service for authlib-injector |
 | `bridge/start-bridge.sh`, `bridge/start-bridge.bat` | Launchers (check Node, then run `bridge.js`) |
 | `README.md`, `LICENSE` | Docs |
 
