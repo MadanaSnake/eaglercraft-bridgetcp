@@ -15,8 +15,8 @@ No `npm install`, no build step: the WebSocket layer (RFC 6455) is written into 
 1. **Install [Node.js](https://nodejs.org)** - take the LTS installer and click through it.
 2. **Download [`Eaglercraft-bridge.zip`](../../releases/latest)** from Releases and unzip it wherever you like.
 3. **Start the bridge** from that folder:
-   - Windows: double-click `start-bridge.bat`
-   - Linux / macOS: `./start-bridge.sh` (if it says permission denied: `chmod +x start-bridge.sh`)
+   - Windows: `start-bridge.bat 8081 --wss` in `cmd` for 1.8.8 / 1.12.2, or double-click `start-bridge.bat` for the plain `ws://` listener only
+   - Linux / macOS: `WSS=1 ./start-bridge.sh` (if it says permission denied: `chmod +x start-bridge.sh`)
 4. **Open <http://localhost:8081>**, enter your Java server's address and port, pick your Eaglercraft version in the dropdown, then click **Save & Apply**. **Test Ping** has to succeed.
 5. **Connect the game** to the address the page shows for your version:
    - 26.2 / 26.3 clients -> `ws://127.0.0.1:8081`
@@ -57,7 +57,10 @@ Windows, in `cmd`:
 ```bat
 start-bridge.bat
 set WSS=1 && start-bridge.bat
+start-bridge.bat 8081 --wss
 ```
+
+The last two are the same thing; the third avoids the environment variable and is the shortest way to get the 1.8.8 / 1.12.2 listener.
 
 PowerShell:
 
